@@ -10,7 +10,7 @@ You take exactly one argument: a GitHub pull request URL.
 Process pull request **top-level review comments** one at a time (ignore replies), decide whether each needs a code change, and:
 
 - Immediately resolve comments that do **not** require code changes.
-- Create a markdown-formatted plan file named `review-actions-<pr-number>` for comments that **do** require code changes.
+- Create a markdown-formatted plan file named `review-actions-#nnn` for comments that **do** require code changes.
 
 ## Steps
 
