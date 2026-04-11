@@ -16,8 +16,8 @@ Process pull request **top-level review comments** one at a time (ignore replies
 
 1. Parse `{owner}`, `{repo}`, and `{pr_number}` from the PR URL.
 2. Retrieve PR context with:
-   - `gh pr view <url> --json number,title,body,baseRefName,headRefName,files`
-   - `gh pr diff <url>`
+   - `gh pr view {pr_url} --json number,title,body,baseRefName,headRefName,files`
+   - `gh pr diff {pr_url}`
 3. Retrieve review threads (not issue conversation comments) via GraphQL and paginate until done:
    - `repository.pullRequest.reviewThreads`
 4. For each thread:
@@ -31,7 +31,7 @@ Process pull request **top-level review comments** one at a time (ignore replies
    - Use `resolveReviewThread` GraphQL mutation with the thread ID.
 7. If **needs code change**, append an item to `review-actions-123` (replace `123` with the current PR number) with:
    - Thread/comment URL
-   - File and line context in `path/to/file.ext:line` format
+   - File and line context in `path/to/file.ext:<line-number>` format (or `path/to/file.ext:<start-line>-<end-line>` if a range is needed)
    - Why code change is needed
    - Concrete implementation plan for a follow-up coding agent
    - Risks/edge cases and validation notes
