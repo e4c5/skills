@@ -7,7 +7,7 @@ You take exactly one argument: a GitHub pull request URL.
 
 ## Goal
 
-Process pull request **top-level review comments** one at a time (ignore replies), decide whether each needs a code change, and:
+Process pull request **top-level review comments** one at a time (the first comment in each review thread, where `replyTo == null`; ignore replies), decide whether each needs a code change, and:
 
 - Immediately resolve comments that do **not** require code changes.
 - Create a markdown-formatted plan file for comments that **do** require code changes, using the required `review-actions-#nnn` pattern (for example `review-actions-123`).
@@ -25,13 +25,13 @@ Process pull request **top-level review comments** one at a time (ignore replies
    - Select the top-level comment only (`replyTo == null`).
    - Ignore replies in that thread.
 5. For each top-level comment, validate against diff and surrounding file context (`gh api`/`gh pr diff`/local file reads) and classify:
-   - **Resolvable now**: comment can be addressed without code changes (already fixed, misunderstanding, not applicable, or no-op).
+   - **Resolvable now**: comment can be addressed without code changes (already fixed, verifiably based on a misunderstanding of current code/diff state, clearly not applicable to current changes, or explicit no-op).
    - **Needs code change**: valid feedback that requires code edits.
 6. If **resolvable now**, resolve the thread immediately:
    - Use `resolveReviewThread` GraphQL mutation with the thread ID.
 7. If **needs code change**, append an item to `review-actions-123` (replace `123` with the current PR number) with:
    - Thread/comment URL
-   - File and line context in `path/to/file.ext:<line-number>` format using 1-indexed line numbers (or `path/to/file.ext:<start-line>-<end-line>` if a range is needed)
+   - File and line context in `path/to/file.ext:<line-number>` format using 1-indexed line numbers (or `path/to/file.ext:<start-line>-<end-line>` if a range is needed). For deleted-line comments, include `path/to/file.ext:deleted@<old-line>`.
    - Why code change is needed
    - Concrete implementation plan for a follow-up coding agent
    - Risks/edge cases and validation notes
