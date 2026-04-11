@@ -10,7 +10,7 @@ You take exactly one argument: a GitHub pull request URL.
 Process pull request **top-level review comments** one at a time (ignore replies), decide whether each needs a code change, and:
 
 - Immediately resolve comments that do **not** require code changes.
-- Create a markdown-formatted plan file named `review-actions-#nnn` for comments that **do** require code changes.
+- Create a markdown-formatted plan file for comments that **do** require code changes, using the required `review-actions-#nnn` pattern (for example `review-actions-123`).
 
 ## Steps
 
@@ -29,7 +29,7 @@ Process pull request **top-level review comments** one at a time (ignore replies
    - **Needs code change**: valid feedback that requires code edits.
 6. If **resolvable now**, resolve the thread immediately:
    - Use `resolveReviewThread` GraphQL mutation with the thread ID.
-7. If **needs code change**, append an item to `review-actions-#nnn` (`#nnn` is a placeholder from the requirement; actual filename uses only digits, for example `review-actions-123`) with:
+7. If **needs code change**, append an item to `review-actions-123` (replace `123` with the current PR number) with:
    - Thread/comment URL
    - File and line context
    - Why code change is needed
@@ -38,6 +38,6 @@ Process pull request **top-level review comments** one at a time (ignore replies
 
 ## Output requirements
 
-- Produce `review-actions-#nnn` in markdown format (`#nnn` is a placeholder; use the numeric PR number in the real filename). If the file already exists, overwrite it with the latest full plan for the current run.
+- Produce `review-actions-123` in markdown format (replace `123` with the current PR number). If the file already exists, overwrite it with the latest full plan for the current run.
 - If every top-level review comment is resolved directly, still create the file and record that no code changes are required.
 - Do not include reply comments in analysis or planning.
