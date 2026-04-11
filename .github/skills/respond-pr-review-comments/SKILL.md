@@ -38,6 +38,6 @@ Process pull request **top-level review comments** one at a time (ignore replies
 
 ## Output requirements
 
-- Produce or update `review-actions-#nnn` in markdown format (`#nnn` is a placeholder; use the numeric PR number in the real filename).
+- Produce `review-actions-#nnn` in markdown format (`#nnn` is a placeholder; use the numeric PR number in the real filename). If the file already exists, overwrite it with the latest full plan for the current run.
 - If every top-level review comment is resolved directly, still create the file and record that no code changes are required.
 - Do not include reply comments in analysis or planning.
