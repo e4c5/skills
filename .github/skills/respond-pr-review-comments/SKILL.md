@@ -10,7 +10,7 @@ You take exactly one argument: a GitHub pull request URL.
 Process pull request **top-level review comments** one at a time (the first comment in each review thread, where `replyTo == null`; ignore replies), decide whether each needs a code change, and:
 
 - Immediately resolve comments that do **not** require code changes.
-- Create a markdown-formatted plan file for comments that **do** require code changes, using the required `review-actions-#nnn` pattern (for example `review-actions-123`).
+- Create a markdown-formatted plan file for comments that **do** require code changes, using the required `review-actions-#nnn` pattern (replace `#nnn` with the PR number, for example `review-actions-123`).
 
 ## Steps
 
@@ -31,11 +31,11 @@ Process pull request **top-level review comments** one at a time (the first comm
    - Use `resolveReviewThread` GraphQL mutation with the thread ID.
 7. If **needs code change**, append an item to `review-actions-123` (replace `123` with the current PR number) with:
    - Thread/comment URL
-   - File and line context in `path/to/file.ext:<line-number>` format using 1-indexed line numbers (or `path/to/file.ext:<start-line>-<end-line>` if a range is needed). For deleted-line comments, include `path/to/file.ext:deleted@<old-line>`. For mixed ranges, include both forms in one field (for example `path/to/file.ext:45-47; deleted@44`).
-     - Example (single line): `src/app.js:52`
-     - Example (range): `src/app.js:52-55`
-     - Example (deleted): `src/app.js:deleted@49`
-     - Example (mixed): `src/app.js:52-55; deleted@49`
+   - File and line context with 1-indexed line numbers:
+     - Single line: `path/to/file.ext:<line-number>` (example: `src/app.js:52`)
+     - Line range: `path/to/file.ext:<start-line>-<end-line>` (example: `src/app.js:52-55`)
+     - Deleted line: `path/to/file.ext:deleted@<old-line>` (example: `src/app.js:deleted@49`)
+     - Mixed added/deleted range: include both in one field (example: `src/app.js:52-55; deleted@49`)
    - Why code change is needed
    - Concrete implementation plan for a follow-up coding agent
    - Risks/edge cases and validation notes
