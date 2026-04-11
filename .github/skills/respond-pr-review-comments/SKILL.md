@@ -25,13 +25,17 @@ Process pull request **top-level review comments** one at a time (the first comm
    - Select the top-level comment only (`replyTo == null`).
    - Ignore replies in that thread.
 5. For each top-level comment, validate against diff and surrounding file context (`gh api`/`gh pr diff`/local file reads) and classify:
-   - **Resolvable now**: comment can be addressed without code changes (already fixed, verifiably based on a misunderstanding of current code/diff state, clearly not applicable to current changes, or explicit no-op).
+   - **Resolvable now**: comment can be addressed without code changes (already fixed, verifiable as based on a misunderstanding of current code/diff state, clearly not applicable to current changes, or explicit no-op).
    - **Needs code change**: valid feedback that requires code edits.
 6. If **resolvable now**, resolve the thread immediately:
    - Use `resolveReviewThread` GraphQL mutation with the thread ID.
 7. If **needs code change**, append an item to `review-actions-123` (replace `123` with the current PR number) with:
    - Thread/comment URL
    - File and line context in `path/to/file.ext:<line-number>` format using 1-indexed line numbers (or `path/to/file.ext:<start-line>-<end-line>` if a range is needed). For deleted-line comments, include `path/to/file.ext:deleted@<old-line>`. For mixed ranges, include both forms in one field (for example `path/to/file.ext:45-47; deleted@44`).
+     - Example (single line): `src/app.js:52`
+     - Example (range): `src/app.js:52-55`
+     - Example (deleted): `src/app.js:deleted@49`
+     - Example (mixed): `src/app.js:52-55; deleted@49`
    - Why code change is needed
    - Concrete implementation plan for a follow-up coding agent
    - Risks/edge cases and validation notes
