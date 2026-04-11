@@ -31,13 +31,13 @@ Process pull request **top-level review comments** one at a time (ignore replies
    - Use `resolveReviewThread` GraphQL mutation with the thread ID.
 7. If **needs code change**, append an item to `review-actions-123` (replace `123` with the current PR number) with:
    - Thread/comment URL
-   - File and line context in `path/to/file.ext:<line-number>` format (or `path/to/file.ext:<start-line>-<end-line>` if a range is needed)
+   - File and line context in `path/to/file.ext:<line-number>` format using 1-indexed line numbers (or `path/to/file.ext:<start-line>-<end-line>` if a range is needed)
    - Why code change is needed
    - Concrete implementation plan for a follow-up coding agent
    - Risks/edge cases and validation notes
 
 ## Output requirements
 
-- Produce `review-actions-123` in markdown format (replace `123` with the current PR number). If the file already exists, overwrite it with the latest full plan for the current run so there is a single authoritative plan file per PR.
+- Produce `review-actions-123` in markdown format (replace `123` with the current PR number). If the file already exists, append a new run section with timestamp and keep prior sections for history.
 - If every top-level review comment is resolved directly, still create the file and record that no code changes are required.
 - Do not include reply comments in analysis or planning.
