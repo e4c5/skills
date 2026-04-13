@@ -1,7 +1,7 @@
 # AI Coding Agent Skills
 
 A collection of skills designed to extend the capabilities of various coding agents for common software engineering workflows.
-git
+
 
 ## Available Skills
 
@@ -16,4 +16,4 @@ Fetches and prioritizes SonarQube or SonarCloud issues and duplication reports. 
 For private projects, the `Analyze Sonar Issues` skill requires an authentication token. Set the `SONAR_TOKEN` (or `SONARCLOUD_TOKEN`) environment variable with your project's analysis token.
 
 ### [Find Last Good Commit](./find-last-good-commit)
-Identifies the most recent commit in a git repository where a specified test suite passes. It automates the process of stashing uncommitted changes, iterating through the commit history, and running test commands to find a stable point for regression analysis.
+Identifies the most recent commit in a git repository where a specified test suite passes. It automates the process of stashing uncommitted changes, iterating through the commit history, and running test commands to find a stable point for regression analysis. When it encounters a commit where all relevant tests are passing, it will stop.
