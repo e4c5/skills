@@ -35,7 +35,10 @@ def stash_changes() -> bool:
     status = run_command("git status --porcelain").stdout.strip()
     if status:
         print("Stashing uncommitted changes...")
-        run_command("git stash")
+        stash_res = run_command("git stash", capture_output=True)
+        if stash_res.returncode != 0:
+            print(f"Failed to stash changes: {stash_res.stderr.strip()}", file=sys.stderr)
+            raise RuntimeError("git stash failed")
         return True
     return False
 
@@ -69,10 +72,16 @@ def find_good_commit(commits: list[tuple[str, str]], test_command: str) -> str |
 def restore_state(original_ref: str, stashed: bool) -> None:
     """Checkout the original ref and pop any stash that was created."""
     print(f"Returning to original ref {original_ref[:8]}...")
-    run_command(f"git checkout {original_ref}", capture_output=True)
+    checkout_res = run_command(f"git checkout {original_ref}", capture_output=True)
+    if checkout_res.returncode != 0:
+        raise RuntimeError(
+            f"Failed to restore original ref {original_ref[:8]}: {checkout_res.stderr.strip()}"
+        )
     if stashed:
         print("Restoring stashed changes...")
-        run_command("git stash pop")
+        pop_res = run_command("git stash pop", capture_output=True)
+        if pop_res.returncode != 0:
+            raise RuntimeError(f"Failed to pop stash: {pop_res.stderr.strip()}")
 
 
 def main():
@@ -82,6 +91,8 @@ def main():
     parser.add_argument("--no-stash", action="store_true", help="Do not stash uncommitted changes.")
 
     args = parser.parse_args()
+    if args.limit < 1:
+        parser.error("--limit must be a positive integer (>= 1)")
 
     if not is_git_repo():
         print("Error: Not a git repository.", file=sys.stderr)
