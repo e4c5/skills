@@ -65,10 +65,7 @@ def _paginate_gh_issue_comments(owner: str, repo: str, pr_number: int) -> list[d
             f"/repos/{owner}/{repo}/issues/{pr_number}/comments"
             f"?per_page={per_page}&page={page}&sort=created&direction=asc"
         )
-        try:
-            batch = run_gh_json(["api", path])
-        except RuntimeError:
-            break
+        batch = run_gh_json(["api", path])
         if not batch:
             break
         collected.extend(batch)
@@ -87,10 +84,7 @@ def _paginate_gh_pr_review_comments(owner: str, repo: str, pr_number: int) -> li
             f"/repos/{owner}/{repo}/pulls/{pr_number}/comments"
             f"?per_page={per_page}&page={page}"
         )
-        try:
-            batch = run_gh_json(["api", path])
-        except RuntimeError:
-            break
+        batch = run_gh_json(["api", path])
         if not batch:
             break
         collected.extend(batch)
@@ -102,6 +96,24 @@ def _paginate_gh_pr_review_comments(owner: str, repo: str, pr_number: int) -> li
 
 def _comment_ts(c: dict) -> str:
     return c.get("updated_at") or c.get("created_at") or ""
+
+
+def _is_sonar(body: str, login: str) -> bool:
+    b = (body or "").lower()
+    a = (login or "").lower()
+    if "sonarcloud.io" in b or "sonarqube" in b:
+        return True
+    if "sonar" in a:
+        return True
+    return False
+
+
+def _extract_sonar_url(body: str) -> str | None:
+    m = SONAR_LINK_RE.search(body)
+    if m:
+        return m.group(0).rstrip(".,);")
+    m = SONAR_LINK_RE.search(body.replace("](", " ").replace(")", " "))
+    return m.group(0).rstrip(".,);") if m else None
 
 
 def gh_pr_comments_for_sonar(owner: str, repo: str, pr_number: int) -> str | None:
@@ -116,28 +128,12 @@ def gh_pr_comments_for_sonar(owner: str, repo: str, pr_number: int) -> str | Non
         merged.append(("review", c))
     merged.sort(key=lambda x: _comment_ts(x[1]))
 
-    def is_sonar(body: str, login: str) -> bool:
-        b = (body or "").lower()
-        a = (login or "").lower()
-        if "sonarcloud.io" in b or "sonarqube" in b:
-            return True
-        if "sonar" in a:
-            return True
-        return False
-
-    def extract_url(body: str) -> str | None:
-        m = SONAR_LINK_RE.search(body)
-        if m:
-            return m.group(0).rstrip(".,);")
-        m = SONAR_LINK_RE.search(body.replace("](", " ").replace(")", " "))
-        return m.group(0).rstrip(".,);") if m else None
-
     for _kind, c in reversed(merged):
         body = c.get("body") or ""
         login = (c.get("user") or {}).get("login") or ""
-        if not is_sonar(body, login):
+        if not _is_sonar(body, login):
             continue
-        url = extract_url(body)
+        url = _extract_sonar_url(body)
         if url:
             return url
 
@@ -154,8 +150,7 @@ def merge_query(
 ) -> dict[str, list[str]]:
     out = {k: list(v) for k, v in existing.items()}
     for k, v in extra.items():
-        if k not in out:
-            out[k] = [v]
+        out[k] = [v]
     return out
 
 
@@ -165,9 +160,16 @@ def dashboard_url_to_api_search(url: str) -> str:
     qs = urllib.parse.parse_qs(parsed.query)
     base = f"{parsed.scheme}://{parsed.netloc}".rstrip("/")
 
-    component_keys = (
-        qs.get("id") or qs.get("component") or qs.get("projectKey") or [None]
+    component = (
+        qs.get("id")
+        or qs.get("component")
+        or qs.get("projectKey")
+        or qs.get("componentKey")
+        or qs.get("componentKeys")
+        or [None]
     )[0]
+    if component and "," in component:
+        component = component.split(",")[0]
     pull_request = (qs.get("pullRequest") or [None])[0]
     branch = (qs.get("branch") or [None])[0]
 
@@ -176,8 +178,8 @@ def dashboard_url_to_api_search(url: str) -> str:
         ("ps", "500"),
         ("additionalFields", "_all"),
     ]
-    if component_keys:
-        api_params.insert(0, ("componentKeys", component_keys))
+    if component:
+        api_params.insert(0, ("componentKeys", component))
     if pull_request:
         api_params.append(("pullRequest", pull_request))
     if branch:
@@ -299,15 +301,24 @@ def fetch_duplication_details(base_url: str, file_key: str, pull_request: str | 
         params["branch"] = branch
     
     url = f"{base_url}/api/duplications/show?{urllib.parse.urlencode(params)}"
-    try:
-        return http_get_json(url)
-    except Exception:
-        return {}
+    return http_get_json(url)
+
+
+def _extract_density(component: dict) -> float:
+    """Extract max duplication density from component measures."""
+    density = 0.0
+    for m in component.get("measures", []):
+        if m.get("metric") in ["duplicated_lines_density", "new_duplicated_lines_density"]:
+            periods = m.get("periods")
+            val = m.get("value") or (periods[0].get("value") if periods else "0")
+            try:
+                density = max(density, float(val))
+            except (ValueError, TypeError):
+                pass
+    return density
 
 
 def fetch_duplications(base_url: str, component: str, pull_request: str | None = None, branch: str | None = None) -> dict:
-    # ... (same as before but passing parameters to fetch_duplication_details)
-    # I'll just replace the whole function to be safe.
     """Fetch duplication measures for the component/PR."""
     params = {
         "component": component,
@@ -319,10 +330,7 @@ def fetch_duplications(base_url: str, component: str, pull_request: str | None =
         params["branch"] = branch
     
     url = f"{base_url}/api/measures/component?{urllib.parse.urlencode(params)}"
-    try:
-        measures_data = http_get_json(url)
-    except Exception:
-        return {}
+    measures_data = http_get_json(url)
 
     # Also fetch component tree to see which files have duplications
     tree_params = {
@@ -337,24 +345,15 @@ def fetch_duplications(base_url: str, component: str, pull_request: str | None =
         tree_params["branch"] = branch
     
     tree_url = f"{base_url}/api/measures/component_tree?{urllib.parse.urlencode(tree_params)}"
-    try:
-        tree_data = http_get_json(tree_url)
-    except Exception:
-        tree_data = {}
+    tree_data = http_get_json(tree_url)
 
     files = tree_data.get("components", [])
     for f in files:
-        density = 0.0
-        for m in f.get("measures", []):
-            if m.get("metric") in ["duplicated_lines_density", "new_duplicated_lines_density"]:
-                val = m.get("value") or (m.get("periods", [{}])[0].get("value") if m.get("periods") else "0")
-                try:
-                    density = max(density, float(val))
-                except ValueError:
-                    pass
-        
-        if density > 0:
-            f["duplication_details"] = fetch_duplication_details(base_url, f["key"], pull_request, branch)
+        if _extract_density(f) > 0:
+            try:
+                f["duplication_details"] = fetch_duplication_details(base_url, f["key"], pull_request, branch)
+            except Exception:
+                f["duplication_details"] = {}
 
     return {
         "summary": measures_data.get("component", {}).get("measures", []),
@@ -362,44 +361,65 @@ def fetch_duplications(base_url: str, component: str, pull_request: str | None =
     }
 
 
-def main() -> None:
+def _get_api_params_from_url(url: str) -> tuple[str | None, str | None, str | None]:
+    """Extract component, pullRequest, and branch from a Sonar URL."""
+    parsed = urllib.parse.urlparse(url)
+    qs = urllib.parse.parse_qs(parsed.query)
+
+    component = (
+        qs.get("id")
+        or qs.get("component")
+        or qs.get("projectKey")
+        or qs.get("componentKey")
+        or qs.get("componentKeys")
+        or [None]
+    )[0]
+    if component and "," in component:
+        component = component.split(",")[0]
+
+    pull_request = (qs.get("pullRequest") or [None])[0]
+    branch = (qs.get("branch") or [None])[0]
+    return component, pull_request, branch
+
+
+def _resolve_sonar_url() -> tuple[str, str]:
+    """Determine the Sonar URL from CLI args or GitHub PR."""
     sonar_arg = None
     for a in sys.argv[1:]:
         if a.startswith("http"):
             sonar_arg = a
             break
 
-    source = "cli"
-    resolved_url: str | None = None
-    
-    # If it's a GitHub URL, we need to resolve it to a Sonar link.
     if sonar_arg and "github.com" not in sonar_arg:
-        resolved_url = sonar_arg
-    else:
-        pr_url = sonar_arg or latest_open_pr_url()
-        if not pr_url:
-            print("No open pull requests and no Sonar URL provided.", file=sys.stderr)
-            sys.exit(1)
-        
-        parsed = parse_github_pr(pr_url)
-        if not parsed:
-            # If we couldn't parse it as a PR, but it's an HTTP link, maybe it's just a weird Sonar link?
-            if sonar_arg:
-                resolved_url = sonar_arg
-            else:
-                print(f"Could not parse PR URL: {pr_url}", file=sys.stderr)
-                sys.exit(1)
-        else:
-            owner, repo, pr_number = parsed
-            resolved_url = gh_pr_comments_for_sonar(owner, repo, pr_number)
-            source = f"github_pr:{pr_url}"
-            if not resolved_url:
-                print(
-                    f"No Sonar link found in comments on PR #{pr_number}. "
-                    "Paste a Sonar dashboard or API URL, or ensure the bot left a link.",
-                    file=sys.stderr,
-                )
-                sys.exit(1)
+        return sonar_arg, "cli"
+
+    pr_url = sonar_arg or latest_open_pr_url()
+    if not pr_url:
+        print("No open pull requests and no Sonar URL provided.", file=sys.stderr)
+        sys.exit(1)
+
+    parsed_pr = parse_github_pr(pr_url)
+    if not parsed_pr:
+        if sonar_arg:
+            return sonar_arg, "cli"
+        print(f"Could not parse PR URL: {pr_url}", file=sys.stderr)
+        sys.exit(1)
+
+    owner, repo, pr_number = parsed_pr
+    resolved_url = gh_pr_comments_for_sonar(owner, repo, pr_number)
+    if not resolved_url:
+        print(
+            f"No Sonar link found in comments on PR #{pr_number}. "
+            "Paste a Sonar dashboard or API URL, or ensure the bot left a link.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+    return resolved_url, f"github_pr:{pr_url}"
+
+
+def main() -> None:
+    resolved_url, source = _resolve_sonar_url()
 
     try:
         api_url = ensure_issues_search_url(resolved_url)
@@ -413,15 +433,10 @@ def main() -> None:
         print(str(e), file=sys.stderr)
         sys.exit(1)
 
-    # Extract component/PR/branch from resolved_url to fetch duplications
-    parsed_sonar = urllib.parse.urlparse(resolved_url)
-    qs = urllib.parse.parse_qs(parsed_sonar.query)
-    component = (qs.get("id") or qs.get("component") or qs.get("projectKey") or [None])[0]
-    pull_request = (qs.get("pullRequest") or [None])[0]
-    branch = (qs.get("branch") or [None])[0]
-    
+    component, pull_request, branch = _get_api_params_from_url(resolved_url)
     duplications = {}
     if component:
+        parsed_sonar = urllib.parse.urlparse(resolved_url)
         base_sonar_url = f"{parsed_sonar.scheme}://{parsed_sonar.netloc}".rstrip("/")
         duplications = fetch_duplications(base_sonar_url, component, pull_request, branch)
 
@@ -441,8 +456,12 @@ def main() -> None:
         json.dump(envelope, f, indent=2)
 
     issues = payload.get("issues") or []
-    dup_files = len([f for f in duplications.get("files", []) if any(m.get("metric") == "duplicated_lines_density" and float(m.get("value", 0)) > 0 for m in f.get("measures", []))])
-    print(f"Saved {len(issues)} issue(s) and duplication data for {dup_files} file(s) to {out_path}")
+    files_with_dups = duplications.get("files", [])
+    dup_files_count = len([
+        f for f in files_with_dups 
+        if any(m.get("metric") == "duplicated_lines_density" and float(m.get("value", 0)) > 0 for m in f.get("measures", []))
+    ])
+    print(f"Saved {len(issues)} issue(s) and duplication data for {dup_files_count} file(s) to {out_path}")
 
 
 if __name__ == "__main__":

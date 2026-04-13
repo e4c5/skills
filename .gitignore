@@ -66,6 +66,7 @@ Thumbs.db
 # Temporary files
 *.tmp
 *.temp
+comments-context-*.json
 
 # Credential storage (dev encryption key, connections)
 data/

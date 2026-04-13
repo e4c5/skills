@@ -170,7 +170,8 @@ def fetch_pr_base(owner: str, repo: str, pr_number: int) -> dict | None:
 def decompose_bot_comment(author, body, url):
     """Split large bot comments into multiple actionable items."""
     items = []
-    if author in ["coderabbitai", "codeant-ai", "viper-review"]:
+    normalized_author = (author or "").lower().replace("[bot]", "")
+    if normalized_author in ["coderabbitai", "codeant-ai", "viper-review"]:
         findings = re.findall(
             r"(?:###|####|\*\*)\s*(.*?)\n(.*?)(?=\n(?:###|####|\*\*)|$)",
             body,
@@ -204,20 +205,19 @@ def main(pr_url=None):
     if not pr_url:
         try:
             result = subprocess.run(
-                ["gh", "pr", "list", "--limit", "1", "--json", "url"],
+                ["gh", "pr", "view", "--json", "url"],
                 capture_output=True,
                 text=True,
                 check=True,
                 timeout=TIMEOUT_S,
             )
         except (subprocess.CalledProcessError, subprocess.TimeoutExpired):
-            print("Failed to list pull requests.", file=sys.stderr)
+            print("Failed to get current pull request.", file=sys.stderr)
             sys.exit(1)
-        pr_list = json.loads(result.stdout)
-        if pr_list:
-            pr_url = pr_list[0]["url"]
-        else:
-            print("No open pull requests found.")
+        pr_data = json.loads(result.stdout)
+        pr_url = pr_data.get("url")
+        if not pr_url:
+            print("No pull request found for the current branch.")
             sys.exit(0)
 
     match = re.search(r"github\.com/([^/]+)/([^/]+)/pull/(\d+)", pr_url)
@@ -243,10 +243,11 @@ def main(pr_url=None):
         if thread.get("isResolved") or thread.get("isOutdated"):
             continue
 
+        all_comments = (thread.get("comments") or {}).get("nodes", [])
         top_comments = [
             c
-            for c in (thread.get("comments") or {}).get("nodes", [])
-            if c.get("replyTo") is None
+            for c in all_comments
+            if c.get("replyTo") is None and c.get("id") == all_comments[0].get("id")
         ]
         if not top_comments:
             continue
@@ -310,7 +311,5 @@ def main(pr_url=None):
 
 
 if __name__ == "__main__":
-    url_arg = (
-        sys.argv[1] if len(sys.argv) > 1 and sys.argv[1].startswith("http") else None
-    )
+    url_arg = sys.argv[1] if len(sys.argv) > 1 else None
     main(url_arg)
