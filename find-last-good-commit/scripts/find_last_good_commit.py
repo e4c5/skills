@@ -42,7 +42,7 @@ def stash_changes() -> bool:
 
 def get_commits(limit: int) -> list[tuple[str, str]]:
     """Return a list of (sha, message) tuples for the last `limit` commits."""
-    result = run_command(f"git log -n {limit} --format=%H %s")
+    result = run_command(["git", "log", "-n", str(limit), "--format=%H %s"])
     if result.returncode != 0:
         return []
     return [line.split(" ", 1) for line in result.stdout.strip().split("\n") if line.strip()]
