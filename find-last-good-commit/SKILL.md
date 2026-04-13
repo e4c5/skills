@@ -9,7 +9,7 @@ This skill automates the process of identifying the last commit where tests pass
 
 ## Workflow
 
-1. **Determine Test Command**: Analyze the repository (e.g., check `package.json`, `Pyproject.toml`, `Makefile`) to identify the correct command that runs the full test suite and returns exit code 0 on success.
+1. **Determine Test Command**: Analyze the repository (e.g., check `package.json`, `pyproject.toml`, `Makefile`) to identify the correct command that runs the full test suite and returns exit code 0 on success.
 2. **Execute Search**:
    - Run the bundled script with the determined command:
      ```bash
@@ -25,7 +25,7 @@ Use the provided Python script. It handles the git workflow (stashing, checking 
 **Options:**
 - `--command "<cmd>"` (Required): The full test command as determined by your analysis.
 - `--limit <n>`: The number of recent commits to investigate (default: 20).
-- `--no-stash`: Skip stashing if the directory is already clean.
+- `--no-stash`: Disable automatic stashing of uncommitted changes.
 
 ### Strategic Guidance
 

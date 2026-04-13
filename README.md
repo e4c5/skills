@@ -2,9 +2,6 @@
 
 A collection of skills designed to extend the capabilities of various coding agents for common software engineering workflows.
 
-## Prerequisites
-
-### GitHub Integration
 
 ## Available Skills
 
