@@ -1,11 +1,15 @@
 #!/usr/bin/env python3
 import subprocess
 import sys
-import os
 import shlex
 import argparse
+from typing import Optional, Union
 
-def run_command(cmd, cwd=None, capture_output=True):
+def run_command(
+    cmd: Union[str, list[str]],
+    cwd: Optional[str] = None,
+    capture_output: bool = True,
+) -> subprocess.CompletedProcess[str]:
     args = shlex.split(cmd) if isinstance(cmd, str) else cmd
     result = subprocess.run(
         args,
@@ -18,7 +22,7 @@ def run_command(cmd, cwd=None, capture_output=True):
     return result
 
 
-def is_git_repo():
+def is_git_repo() -> bool:
     return run_command("git rev-parse --is-inside-work-tree").returncode == 0
 
 
@@ -48,7 +52,8 @@ def get_commits(limit: int) -> list[tuple[str, str]]:
     result = run_command(["git", "log", "-n", str(limit), "--format=%H %s"])
     if result.returncode != 0:
         return []
-    return [line.split(" ", 1) for line in result.stdout.strip().split("\n") if line.strip()]
+    pairs = [line.split(" ", 1) for line in result.stdout.strip().split("\n") if line.strip()]
+    return [(p[0], p[1]) for p in pairs if len(p) == 2]
 
 
 def find_good_commit(commits: list[tuple[str, str]], test_command: str) -> str | None:
@@ -84,7 +89,7 @@ def restore_state(original_ref: str, stashed: bool) -> None:
             raise RuntimeError(f"Failed to pop stash: {pop_res.stderr.strip()}")
 
 
-def main():
+def main() -> None:
     parser = argparse.ArgumentParser(description="Find the last known good commit where tests pass.")
     parser.add_argument("--command", required=True, help="The test command to run (e.g., 'npm test').")
     parser.add_argument("--limit", type=int, default=20, help="Maximum number of commits to check backwards.")
