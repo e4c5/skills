@@ -27,21 +27,23 @@ Produce an actionable list of Sonar findings (issues and duplications): Write th
    - Private projects or token-only instances: set **`SONAR_TOKEN`** or **`SONARCLOUD_TOKEN`** in the environment (Sonar user token; passed as HTTP Basic with the token as username and an empty password, per Sonar’s usual convention). Public projects do not need a token.
    - Do not commit tokens or echo them in logs.
 
-3. **Analyze issues and duplications (AI)**
+3. **Analyze issues, security hotspots, and duplications (AI)**
    - Read `sonar-context.json`. 
-   - Use `sonar_response.issues` as the primary list of issues.
+   - Use `sonar_response.issues` as the primary list of findings. This list already contains both regular issues (BUG, VULNERABILITY, CODE_SMELL) and Security Hotspots (type `SECURITY_HOTSPOT`); the script merges and normalizes them before saving.
+     - All items share common fields: `severity`, `type`, `message`, `component`, `line`, `rule`, `status`.
+     - Security Hotspot items additionally carry `securityCategory` (e.g. `sql-injection`, `xss`) and `vulnerabilityProbability` (HIGH/MEDIUM/LOW).
    - Use `duplications` for code duplication findings:
      - Check `duplications.summary` for overall project duplication metrics.
      - Check `duplications.files` for specific files with duplication.
      - For files with `duplication_details`, identify the specific blocks (line numbers and sizes) that are duplicated.
-   - For each issue and duplication finding:
-     - For issues, use fields such as `severity`, `type`, `message`, `component`, `line`, `rule`, etc.
+   - For each finding:
      - For duplications, identify the repeating logic and suggest a refactoring (e.g., extract to a helper function).
-   - **Prioritize:** Blocker/Critical issues first, then Major issues, then significant Duplications, then the rest. Group by component/file when helpful.
+   - **Prioritize:** `SECURITY_HOTSPOT` items (HIGH probability first, then MEDIUM/LOW), then Blocker/Critical BUG/VULNERABILITY issues, then Major issues, then significant Duplications, then CODE_SMELL items. Group by component/file when helpful.
    - **Verify in repo:** Open the referenced paths when `component` or `path` maps cleanly to the workspace; confirm the finding still applies to current code.
    - **Produce a remediation plan** (markdown):
-     - Summary counts by severity and duplication overview.
+     - Summary counts by severity and duplication overview; call out security hotspot count separately.
      - Ordered list of items with file/line, finding description, and a concrete fix approach.
+     - For `SECURITY_HOTSPOT` items, include the `securityCategory` and recommended mitigation pattern.
      - Testing or verification notes where relevant.
 
 4. **output file**
