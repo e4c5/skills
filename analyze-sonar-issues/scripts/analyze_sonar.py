@@ -292,6 +292,74 @@ def fetch_all_issues(initial_api_url: str) -> dict:
     return merged
 
 
+def fetch_security_hotspots(base_url: str, component: str, pull_request: str | None = None, branch: str | None = None) -> list[dict]:
+    """Fetch security hotspots via /api/hotspots/search (separate from issues API)."""
+    all_hotspots: list[dict] = []
+    page = 1
+    while True:
+        params: dict[str, str] = {
+            "projectKey": component,
+            "status": "TO_REVIEW",
+            "ps": "500",
+            "p": str(page),
+        }
+        if pull_request:
+            params["pullRequest"] = pull_request
+        if branch:
+            params["branch"] = branch
+
+        url = f"{base_url}/api/hotspots/search?{urllib.parse.urlencode(params)}"
+        try:
+            data = http_get_json(url)
+        except RuntimeError:
+            # /api/hotspots/search may not exist on older SonarQube versions; skip gracefully
+            break
+
+        hotspots = data.get("hotspots") or []
+        all_hotspots.extend(hotspots)
+
+        paging = data.get("paging") or {}
+        page_index = int(paging.get("pageIndex", page))
+        page_size = int(paging.get("pageSize", len(hotspots) or 500))
+        total = int(paging.get("total", len(all_hotspots)))
+
+        if not hotspots or len(hotspots) < page_size or len(all_hotspots) >= total:
+            break
+        page += 1
+
+    return all_hotspots
+
+
+_HOTSPOT_SEVERITY: dict[str, str] = {
+    "HIGH": "BLOCKER",
+    "MEDIUM": "CRITICAL",
+    "LOW": "MAJOR",
+}
+
+
+def normalize_hotspot(hotspot: dict) -> dict:
+    """Map a hotspot record to the same shape as an issues/search item."""
+    prob = (hotspot.get("vulnerabilityProbability") or "LOW").upper()
+    return {
+        "key": hotspot.get("key"),
+        "rule": hotspot.get("ruleKey"),
+        "severity": _HOTSPOT_SEVERITY.get(prob, "MAJOR"),
+        "type": "SECURITY_HOTSPOT",
+        "securityCategory": hotspot.get("securityCategory"),
+        "vulnerabilityProbability": prob,
+        "component": hotspot.get("component"),
+        "project": hotspot.get("project"),
+        "line": hotspot.get("line"),
+        "message": hotspot.get("message"),
+        "status": hotspot.get("status"),
+        "author": hotspot.get("author"),
+        "creationDate": hotspot.get("creationDate"),
+        "updateDate": hotspot.get("updateDate"),
+        "textRange": hotspot.get("textRange"),
+        "flows": hotspot.get("flows"),
+    }
+
+
 def fetch_duplication_details(base_url: str, file_key: str, pull_request: str | None = None, branch: str | None = None) -> dict:
     """Fetch detailed duplication blocks for a specific file."""
     params = {"key": file_key}
@@ -435,10 +503,17 @@ def main() -> None:
 
     component, pull_request, branch = _get_api_params_from_url(resolved_url)
     duplications = {}
+    security_hotspots: list[dict] = []
     if component:
         parsed_sonar = urllib.parse.urlparse(resolved_url)
         base_sonar_url = f"{parsed_sonar.scheme}://{parsed_sonar.netloc}".rstrip("/")
         duplications = fetch_duplications(base_sonar_url, component, pull_request, branch)
+        raw_hotspots = fetch_security_hotspots(base_sonar_url, component, pull_request, branch)
+        normalized_hotspots = [normalize_hotspot(h) for h in raw_hotspots]
+        payload["issues"] = (payload.get("issues") or []) + normalized_hotspots
+        if payload.get("paging"):
+            payload["paging"]["total"] = len(payload["issues"])
+            payload["paging"]["pageSize"] = len(payload["issues"])
 
     out_name = "sonar-context.json"
     out_path = os.path.join(os.path.dirname(__file__), out_name)
@@ -456,12 +531,13 @@ def main() -> None:
         json.dump(envelope, f, indent=2)
 
     issues = payload.get("issues") or []
+    hotspot_count = sum(1 for i in issues if i.get("type") == "SECURITY_HOTSPOT")
     files_with_dups = duplications.get("files", [])
     dup_files_count = len([
         f for f in files_with_dups 
         if any(m.get("metric") == "duplicated_lines_density" and float(m.get("value", 0)) > 0 for m in f.get("measures", []))
     ])
-    print(f"Saved {len(issues)} issue(s) and duplication data for {dup_files_count} file(s) to {out_path}")
+    print(f"Saved {len(issues)} finding(s) ({hotspot_count} security hotspot(s)) and duplication data for {dup_files_count} file(s) to {out_path}")
 
 
 if __name__ == "__main__":
