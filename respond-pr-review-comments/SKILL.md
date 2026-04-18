@@ -27,7 +27,15 @@ Automate the analysis of pull request comments. Use a Python script to gather ac
        - Check if the issue is still present and if the suggested fix makes sense in the current context.
        - For bot findings, look for "Prompt for AI Agents" or "Committable suggestion" blocks in the comment body.
      - **If no code change is needed:**
-       - Post a reply: `gh pr review {pr_url} --comment --body "@author [Detailed explanation why the change is not needed or already addressed]"`
+       - Post a reply:
+         - If it's a `thread` type, reply directly into the review thread (so it appears inline, not as a standalone comment):
+           ```bash
+           gh api graphql -f query='mutation($threadId: ID!, $body: String!) { addPullRequestReviewThreadReply(input: { pullRequestReviewThreadId: $threadId, body: $body }) { comment { id } } }' -f threadId="{threadId}" -f body="@{author} [Detailed explanation why the change is not needed or already addressed]"
+           ```
+         - If it's a `general` type, post a PR-level comment:
+           ```bash
+           gh pr review {pr_url} --comment --body "@{author} [Detailed explanation why the change is not needed or already addressed]"
+           ```
        - If it's a `thread` type, resolve it:
          ```bash
          gh api graphql -f query='mutation($id: ID!) { resolveReviewThread(input: { threadId: $id }) { thread { isResolved } } }' -f id="{threadId}"
