@@ -311,9 +311,12 @@ def fetch_security_hotspots(base_url: str, component: str, pull_request: str | N
         url = f"{base_url}/api/hotspots/search?{urllib.parse.urlencode(params)}"
         try:
             data = http_get_json(url)
-        except RuntimeError:
-            # /api/hotspots/search may not exist on older SonarQube versions; skip gracefully
-            break
+        except RuntimeError as e:
+            # /api/hotspots/search may not exist on older SonarQube versions; skip gracefully.
+            # Any other error (auth, 5xx, network) should propagate so the caller knows.
+            if "HTTP 404" in str(e):
+                break
+            raise
 
         hotspots = data.get("hotspots") or []
         all_hotspots.extend(hotspots)
