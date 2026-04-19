@@ -26,6 +26,7 @@ query($owner: String!, $repo: String!, $number: Int!, $cursor: String) {
           comments(first: 100) {
             nodes {
               id
+              databaseId
               url
               path
               line
@@ -54,6 +55,7 @@ query($owner: String!, $repo: String!, $number: Int!, $cursor: String) {
         }
         nodes {
           id
+          databaseId
           url
           body
           author { login }
@@ -244,15 +246,16 @@ def main(pr_url=None):
             continue
 
         all_comments = (thread.get("comments") or {}).get("nodes", [])
-        top_comments = [
-            c
-            for c in all_comments
-            if c.get("replyTo") is None and c.get("id") == all_comments[0].get("id")
-        ]
-        if not top_comments:
+        if not all_comments:
             continue
 
-        top_comment = top_comments[0]
+        # The root comment is the one that has no replyTo
+        top_comments = [c for c in all_comments if c.get("replyTo") is None]
+        if not top_comments:
+            # Fallback to first comment if no replyTo is found (shouldn't happen)
+            top_comment = all_comments[0]
+        else:
+            top_comment = top_comments[0]
         author = top_comment["author"]["login"] if top_comment.get("author") else "ghost"
 
         decomposed = decompose_bot_comment(
@@ -265,6 +268,7 @@ def main(pr_url=None):
                     "type": "thread",
                     "threadId": thread["id"],
                     "id": top_comment["id"],
+                    "databaseId": top_comment["databaseId"],
                     "url": top_comment["url"],
                     "path": top_comment.get("path"),
                     "line": top_comment.get("line")
@@ -285,6 +289,7 @@ def main(pr_url=None):
                 {
                     "type": "general",
                     "id": comment["id"],
+                    "databaseId": comment["databaseId"],
                     "url": comment["url"],
                     "body": item["content"],
                     "title": item["title"],
