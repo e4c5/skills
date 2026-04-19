@@ -30,7 +30,7 @@ Automate the analysis of pull request comments. Use a Python script to gather ac
        - Post a reply:
          - If it's a `thread` type, reply directly into the review thread to ensure it's attached:
            ```bash
-           gh api repos/{owner}/{repo}/pulls/comments/{databaseId}/replies -f body="@{author} [Detailed explanation why the change is not needed or already addressed]"
+           gh api repos/{owner}/{repo}/pulls/{pr_number}/comments/{databaseId}/replies -f body="@{author} [Detailed explanation why the change is not needed or already addressed]"
            ```
          - If it's a `general` type, post an issue comment (PRs are issues):
            ```bash
