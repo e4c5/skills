@@ -17,6 +17,10 @@ Automate the analysis of pull request comments. Use a Python script to gather ac
 1. **Gather Context:**
    - Run the analysis script: `python3 .agents/skills/respond-pr-review-comments/scripts/analyze_pr.py [PR_URL]`
    - Identify the generated context file: `comments-context-{pr_number}.json`. If the script terminates without generating this file (e.g., no open PRs), inform the user and stop.
+   - Read the `summary` first. This distinguishes:
+     - `threads_active_unresolved`: still need action or explicit resolution.
+     - `threads_outdated`: still visible on GitHub, but already superseded by code changes and intentionally skipped.
+     - `threads_resolved`: already closed threads.
 
 2. **Process Comments:**
    - Read the context file.
@@ -40,6 +44,8 @@ Automate the analysis of pull request comments. Use a Python script to gather ac
          ```bash
          gh api graphql -f query='mutation($id: ID!) { resolveReviewThread(input: { threadId: $id }) { thread { isResolved } } }' -f id="{threadId}"
          ```
+   - If the user asks why comments are "still there," check `skipped_threads` before assuming the skill missed them. Outdated threads remain visible in GitHub review history even when they no longer need action.
+   - After a separate implementation pass, do a second verification pass on any still-active unresolved threads. If the fix is now present in code, reply with the verification and resolve the thread instead of re-adding it to `fixes.md`.
      - **If a code change is needed:**
        - Append a detailed entry to `fixes.md`:
          - **Comment URL:** {url}
@@ -62,3 +68,4 @@ Automate the analysis of pull request comments. Use a Python script to gather ac
 - Produce a `fixes.md` file containing all actionable items.
 - Ensure all non-actionable threads are resolved on GitHub.
 - Do not process outdated or already resolved comments.
+- Make it explicit to the user when a remaining comment is merely outdated versus still actively unresolved.
