@@ -312,9 +312,11 @@ def fetch_security_hotspots(base_url: str, component: str, pull_request: str | N
         try:
             data = http_get_json(url)
         except RuntimeError as e:
-            # /api/hotspots/search may not exist on older SonarQube versions; skip gracefully.
-            # Any other error (auth, 5xx, network) should propagate so the caller knows.
-            if "HTTP 404" in str(e):
+            # /api/hotspots/search may not exist on older SonarQube versions, or the
+            # token may lack the "Administer Security Hotspot" permission; skip gracefully.
+            # Any other error (5xx, network) should propagate so the caller knows.
+            if "HTTP 404" in str(e) or "HTTP 403" in str(e):
+                print(f"Warning: could not fetch security hotspots ({e}); continuing without them.", file=sys.stderr)
                 break
             raise
 
@@ -415,10 +417,25 @@ def fetch_duplications(base_url: str, component: str, pull_request: str | None =
     if branch:
         tree_params["branch"] = branch
     
-    tree_url = f"{base_url}/api/measures/component_tree?{urllib.parse.urlencode(tree_params)}"
-    tree_data = http_get_json(tree_url)
+    all_files: list[dict] = []
+    page = 1
+    try:
+        while True:
+            tree_params["p"] = str(page)
+            tree_url = f"{base_url}/api/measures/component_tree?{urllib.parse.urlencode(tree_params)}"
+            tree_data = http_get_json(tree_url)
+            batch = tree_data.get("components", [])
+            all_files.extend(batch)
+            paging = tree_data.get("paging", {})
+            total = int(paging.get("total", len(all_files)))
+            if not batch or len(all_files) >= total:
+                break
+            page += 1
+    except RuntimeError as e:
+        print(f"Warning: could not fetch per-file duplication tree ({e}); continuing with summary metrics only.", file=sys.stderr)
+        all_files = []
 
-    files = tree_data.get("components", [])
+    files = all_files
     for f in files:
         if _extract_density(f) > 0:
             try:
