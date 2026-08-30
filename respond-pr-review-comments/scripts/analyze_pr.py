@@ -173,10 +173,11 @@ def decompose_bot_comment(author, body, url):
     """Split large bot comments into multiple actionable items."""
     items = []
     normalized_author = (author or "").lower().replace("[bot]", "")
+    cleaned_body = re.sub(r"^\s*<!--.*?-->\s*", "", body, flags=re.DOTALL)
     if normalized_author in ["coderabbitai", "codeant-ai", "viper-review"]:
         findings = re.findall(
             r"(?:###|####|\*\*)\s*(.*?)\n(.*?)(?=\n(?:###|####|\*\*)|$)",
-            body,
+            cleaned_body,
             re.DOTALL,
         )
         for title, content in findings:
@@ -194,6 +195,21 @@ def decompose_bot_comment(author, body, url):
                 items.append(
                     {
                         "title": title.strip(),
+                        "content": content.strip(),
+                    }
+                )
+
+        # Many review bots also emit single finding comments like:
+        # "[High] message..."
+        if not items:
+            severity_match = re.match(
+                r"^\s*(\[[^\]]+\])\s*(.+?)\s*$", cleaned_body, re.DOTALL
+            )
+            if severity_match:
+                severity, content = severity_match.groups()
+                items.append(
+                    {
+                        "title": severity.strip(),
                         "content": content.strip(),
                     }
                 )
@@ -240,9 +256,46 @@ def main(pr_url=None):
     comment_nodes = fetch_issue_comments(owner, repo, pr_number)
 
     comments_to_process = []
+    skipped_threads = []
+    summary = {
+        "threads_total": len(thread_nodes),
+        "threads_resolved": 0,
+        "threads_outdated": 0,
+        "threads_active_unresolved": 0,
+        "issue_comments_total": len(comment_nodes),
+    }
 
     for thread in thread_nodes:
-        if thread.get("isResolved") or thread.get("isOutdated"):
+        is_resolved = bool(thread.get("isResolved"))
+        is_outdated = bool(thread.get("isOutdated"))
+
+        if is_resolved:
+            summary["threads_resolved"] += 1
+        elif is_outdated:
+            summary["threads_outdated"] += 1
+        else:
+            summary["threads_active_unresolved"] += 1
+
+        if is_resolved or is_outdated:
+            all_comments = (thread.get("comments") or {}).get("nodes", [])
+            top_comment = next(
+                (comment for comment in all_comments if comment.get("replyTo") is None),
+                all_comments[0] if all_comments else None,
+            )
+            skipped_threads.append(
+                {
+                    "threadId": thread["id"],
+                    "isResolved": is_resolved,
+                    "isOutdated": is_outdated,
+                    "url": top_comment.get("url") if top_comment else None,
+                    "path": top_comment.get("path") if top_comment else None,
+                    "line": (
+                        top_comment.get("line") or top_comment.get("originalLine")
+                        if top_comment
+                        else None
+                    ),
+                }
+            )
             continue
 
         all_comments = (thread.get("comments") or {}).get("nodes", [])
@@ -267,6 +320,8 @@ def main(pr_url=None):
                 {
                     "type": "thread",
                     "threadId": thread["id"],
+                    "isResolved": is_resolved,
+                    "isOutdated": is_outdated,
                     "id": top_comment["id"],
                     "databaseId": top_comment["databaseId"],
                     "url": top_comment["url"],
@@ -304,6 +359,8 @@ def main(pr_url=None):
         "pr_number": pr_number,
         "pr_id": pr_id,
         "generated_at": datetime.now(timezone.utc).isoformat(),
+        "summary": summary,
+        "skipped_threads": skipped_threads,
         "comments": comments_to_process,
     }
 
