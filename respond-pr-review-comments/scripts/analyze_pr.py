@@ -1,14 +1,22 @@
 #!/usr/bin/env python3
-"""Fetch PR review threads and top-level comments for offline analysis (GitHub CLI)."""
+"""Fetch PR/MR review threads and top-level comments for offline analysis.
+
+Supports GitHub pull requests (via `gh`) and GitLab merge requests (via `glab`).
+"""
 
 import json
 import os
 import re
 import subprocess
 import sys
+import urllib.parse
 from datetime import datetime, timezone
 
 TIMEOUT_S = 30
+
+GITHUB_PR_RE = re.compile(r"github\.com/([^/]+)/([^/]+)/pull/(\d+)")
+GITLAB_MR_RE = re.compile(r"^https?://([^/]+)/(.+?)/-/merge_requests/(\d+)")
+HUNK_HEADER_RE = re.compile(r"^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@")
 
 THREAD_QUERY = """
 query($owner: String!, $repo: String!, $number: Int!, $cursor: String) {
@@ -219,33 +227,7 @@ def decompose_bot_comment(author, body, url):
     return items
 
 
-def main(pr_url=None):
-    if not pr_url:
-        try:
-            result = subprocess.run(
-                ["gh", "pr", "view", "--json", "url"],
-                capture_output=True,
-                text=True,
-                check=True,
-                timeout=TIMEOUT_S,
-            )
-        except (subprocess.CalledProcessError, subprocess.TimeoutExpired):
-            print("Failed to get current pull request.", file=sys.stderr)
-            sys.exit(1)
-        pr_data = json.loads(result.stdout)
-        pr_url = pr_data.get("url")
-        if not pr_url:
-            print("No pull request found for the current branch.")
-            sys.exit(0)
-
-    match = re.search(r"github\.com/([^/]+)/([^/]+)/pull/(\d+)", pr_url)
-    if not match:
-        print(f"Invalid PR URL: {pr_url}")
-        sys.exit(1)
-
-    owner, repo, pr_number = match.groups()
-    pr_number = int(pr_number)
-
+def build_github_context(owner: str, repo: str, pr_number: int, pr_url: str) -> dict:
     pr_node = fetch_pr_base(owner, repo, pr_number)
     if not pr_node:
         print("Pull request not found.")
@@ -352,20 +334,342 @@ def main(pr_url=None):
                 }
             )
 
-    output_data = {
+    return {
+        "provider": "github",
+        "host": "github.com",
         "owner": owner,
         "repo": repo,
         "pr_url": pr_url,
         "pr_number": pr_number,
         "pr_id": pr_id,
-        "generated_at": datetime.now(timezone.utc).isoformat(),
         "summary": summary,
         "skipped_threads": skipped_threads,
         "comments": comments_to_process,
     }
 
-    filename = f"comments-context-{pr_number}.json"
-    out_path = os.path.join(os.path.dirname(__file__), filename)
+
+def run_glab_api(
+    host: str,
+    endpoint: str,
+    method: str = "GET",
+    fields: dict | None = None,
+    paginate: bool = False,
+    raw: bool = False,
+):
+    """Call the GitLab REST API through `glab api`.
+
+    Returns parsed JSON, a list of items when paginating, or text when raw=True.
+    """
+    cmd = ["glab", "api", "--hostname", host, "--method", method, endpoint]
+    for key, value in (fields or {}).items():
+        cmd += ["--raw-field", f"{key}={value}"]
+    if paginate:
+        cmd += ["--paginate", "--output", "ndjson"]
+    try:
+        result = subprocess.run(
+            cmd, capture_output=True, text=True, check=True, timeout=TIMEOUT_S
+        )
+    except subprocess.CalledProcessError as e:
+        raise RuntimeError(f"glab api {endpoint} failed: {e.stderr or e.stdout}") from e
+    except subprocess.TimeoutExpired as e:
+        raise RuntimeError(f"glab api {endpoint} timed out") from e
+    if raw:
+        return result.stdout
+    if paginate:
+        return [json.loads(line) for line in result.stdout.splitlines() if line.strip()]
+    return json.loads(result.stdout)
+
+
+def gitlab_project_endpoint(project_path: str) -> str:
+    return f"projects/{urllib.parse.quote(project_path, safe='')}"
+
+
+def fetch_gitlab_mr_diffs(host: str, project_ep: str, mr_iid: int) -> dict[str, dict]:
+    """Map each changed path (old and new) to its diff entry in the current MR version."""
+    try:
+        diffs = run_glab_api(
+            host,
+            f"{project_ep}/merge_requests/{mr_iid}/diffs?per_page=100",
+            paginate=True,
+        )
+    except RuntimeError:
+        # GitLab < 15.7 has no /diffs endpoint; /changes is the deprecated equivalent.
+        changes = run_glab_api(host, f"{project_ep}/merge_requests/{mr_iid}/changes")
+        diffs = changes.get("changes") or []
+    by_path: dict[str, dict] = {}
+    for entry in diffs:
+        for key in ("new_path", "old_path"):
+            if entry.get(key):
+                by_path.setdefault(entry[key], entry)
+    return by_path
+
+
+def extract_hunk(diff_text: str, line: int, old_side: bool = False) -> str | None:
+    """Return the unified-diff hunk that covers `line` on the new (or old) side."""
+    for hunk in re.split(r"(?m)^(?=@@ )", diff_text or ""):
+        m = HUNK_HEADER_RE.match(hunk)
+        if not m:
+            continue
+        if old_side:
+            start, count = int(m.group(1)), int(m.group(2) or 1)
+        else:
+            start, count = int(m.group(3)), int(m.group(4) or 1)
+        if start <= line < start + count:
+            return hunk.rstrip("\n")
+    return None
+
+
+class GitLabFileCache:
+    def __init__(self, host: str, project_ep: str):
+        self.host = host
+        self.project_ep = project_ep
+        self._cache: dict[tuple[str, str], list[str] | None] = {}
+
+    def lines(self, path: str, ref: str) -> list[str] | None:
+        key = (path, ref)
+        if key not in self._cache:
+            endpoint = (
+                f"{self.project_ep}/repository/files/"
+                f"{urllib.parse.quote(path, safe='')}/raw?ref={ref}"
+            )
+            try:
+                text = run_glab_api(self.host, endpoint, raw=True)
+                self._cache[key] = text.splitlines()
+            except RuntimeError:
+                self._cache[key] = None
+        return self._cache[key]
+
+
+def gitlab_position_status(
+    position: dict | None,
+    head_sha: str,
+    diffs_by_path: dict[str, dict],
+    files: GitLabFileCache,
+) -> tuple[bool, int | None]:
+    """Approximate GitHub's isOutdated for a GitLab diff note.
+
+    GitLab has no outdated flag, so a note counts as outdated when it was made on
+    an older MR version and the commented line no longer exists unchanged in the
+    current head (allowing for the line having moved). Returns (outdated, line).
+    """
+    if not position:
+        return False, None
+    new_path = position.get("new_path")
+    old_path = position.get("old_path")
+    new_line = position.get("new_line")
+    old_line = position.get("old_line")
+
+    if position.get("head_sha") == head_sha:
+        return False, new_line or old_line
+
+    if new_path not in diffs_by_path and old_path not in diffs_by_path:
+        return True, new_line or old_line
+
+    if new_line is None:
+        # Comment on a removed line: the old side comes from the base, which
+        # rarely changes, so it stays active while the file is still in the diff.
+        return False, old_line
+
+    original = files.lines(new_path, position["head_sha"])
+    current = files.lines(new_path, head_sha)
+    if original is None or current is None or new_line > len(original):
+        return True, new_line
+
+    text = original[new_line - 1]
+    if new_line <= len(current) and current[new_line - 1] == text:
+        return False, new_line
+    if text.strip():
+        matches = [i + 1 for i, candidate in enumerate(current) if candidate == text]
+        if len(matches) == 1:
+            return False, matches[0]
+    return True, new_line
+
+
+def build_gitlab_context(host: str, project_path: str, mr_iid: int, mr_url: str) -> dict:
+    project_ep = gitlab_project_endpoint(project_path)
+    try:
+        mr = run_glab_api(host, f"{project_ep}/merge_requests/{mr_iid}")
+    except RuntimeError as e:
+        print(f"Merge request not found: {e}", file=sys.stderr)
+        sys.exit(1)
+
+    web_url = mr.get("web_url") or mr_url
+    head_sha = (mr.get("diff_refs") or {}).get("head_sha") or mr.get("sha")
+    discussions = run_glab_api(
+        host,
+        f"{project_ep}/merge_requests/{mr_iid}/discussions?per_page=100",
+        paginate=True,
+    )
+    diffs_by_path = fetch_gitlab_mr_diffs(host, project_ep, mr_iid)
+    files = GitLabFileCache(host, project_ep)
+
+    comments_to_process = []
+    skipped_threads = []
+    summary = {
+        "threads_total": 0,
+        "threads_resolved": 0,
+        "threads_outdated": 0,
+        "threads_active_unresolved": 0,
+        "issue_comments_total": 0,
+    }
+
+    for discussion in discussions:
+        # System notes ("added 1 commit", "changed the description") are events, not comments.
+        notes = [n for n in discussion.get("notes") or [] if not n.get("system")]
+        if not notes:
+            continue
+        top_note = notes[0]
+        author = (top_note.get("author") or {}).get("username") or "ghost"
+        url = f"{web_url}#note_{top_note['id']}"
+        decomposed = decompose_bot_comment(author, top_note.get("body") or "", url)
+
+        if discussion.get("individual_note") or not top_note.get("resolvable"):
+            summary["issue_comments_total"] += 1
+            for item in decomposed:
+                comments_to_process.append(
+                    {
+                        "type": "general",
+                        "id": top_note["id"],
+                        "databaseId": top_note["id"],
+                        "url": url,
+                        "body": item["content"],
+                        "title": item["title"],
+                        "author": author,
+                    }
+                )
+            continue
+
+        summary["threads_total"] += 1
+        position = top_note.get("position")
+        path = (position or {}).get("new_path") or (position or {}).get("old_path")
+        is_resolved = all(n.get("resolved") for n in notes if n.get("resolvable"))
+        is_outdated = False
+        line = None
+        if not is_resolved:
+            is_outdated, line = gitlab_position_status(
+                position, head_sha, diffs_by_path, files
+            )
+        elif position:
+            line = position.get("new_line") or position.get("old_line")
+
+        if is_resolved:
+            summary["threads_resolved"] += 1
+        elif is_outdated:
+            summary["threads_outdated"] += 1
+        else:
+            summary["threads_active_unresolved"] += 1
+
+        if is_resolved or is_outdated:
+            skipped_threads.append(
+                {
+                    "threadId": discussion["id"],
+                    "isResolved": is_resolved,
+                    "isOutdated": is_outdated,
+                    "url": url,
+                    "path": path,
+                    "line": line,
+                }
+            )
+            continue
+
+        diff_hunk = None
+        if position and path in diffs_by_path and line:
+            diff_hunk = extract_hunk(
+                diffs_by_path[path].get("diff"),
+                line,
+                old_side=position.get("new_line") is None,
+            )
+
+        for item in decomposed:
+            comments_to_process.append(
+                {
+                    "type": "thread",
+                    "threadId": discussion["id"],
+                    "isResolved": is_resolved,
+                    "isOutdated": is_outdated,
+                    "id": top_note["id"],
+                    "databaseId": top_note["id"],
+                    "url": url,
+                    "path": path,
+                    "line": line,
+                    "diffHunk": diff_hunk,
+                    "body": item["content"],
+                    "title": item["title"],
+                    "author": author,
+                }
+            )
+
+    namespace, _, repo = project_path.rpartition("/")
+    return {
+        "provider": "gitlab",
+        "host": host,
+        "project": project_path,
+        "owner": namespace,
+        "repo": repo,
+        "pr_url": web_url,
+        "pr_number": mr_iid,
+        "pr_id": mr.get("id"),
+        "summary": summary,
+        "skipped_threads": skipped_threads,
+        "comments": comments_to_process,
+    }
+
+
+def origin_remote_url() -> str:
+    try:
+        result = subprocess.run(
+            ["git", "remote", "get-url", "origin"],
+            capture_output=True,
+            text=True,
+            check=True,
+            timeout=TIMEOUT_S,
+        )
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired, OSError):
+        return ""
+    return result.stdout.strip()
+
+
+def current_branch_review_url() -> str | None:
+    """Find the PR/MR for the current branch, asking gh or glab based on the origin remote."""
+    if "github.com" in origin_remote_url():
+        cmd = ["gh", "pr", "view", "--json", "url"]
+        key = "url"
+    else:
+        cmd = ["glab", "mr", "view", "--output", "json"]
+        key = "web_url"
+    try:
+        result = subprocess.run(
+            cmd, capture_output=True, text=True, check=True, timeout=TIMEOUT_S
+        )
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired):
+        print("Failed to get current pull/merge request.", file=sys.stderr)
+        sys.exit(1)
+    return json.loads(result.stdout).get(key)
+
+
+def main(pr_url=None):
+    if not pr_url:
+        pr_url = current_branch_review_url()
+        if not pr_url:
+            print("No pull/merge request found for the current branch.")
+            sys.exit(0)
+
+    github_match = GITHUB_PR_RE.search(pr_url)
+    gitlab_match = GITLAB_MR_RE.search(pr_url)
+    if github_match:
+        owner, repo, pr_number = github_match.groups()
+        output_data = build_github_context(owner, repo, int(pr_number), pr_url)
+    elif gitlab_match:
+        host, project_path, mr_iid = gitlab_match.groups()
+        output_data = build_gitlab_context(host, project_path, int(mr_iid), pr_url)
+    else:
+        print(f"Invalid PR/MR URL: {pr_url}")
+        sys.exit(1)
+
+    output_data["generated_at"] = datetime.now(timezone.utc).isoformat()
+
+    filename = f"comments-context-{output_data['pr_number']}.json"
+    out_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), filename)
     with open(out_path, "w", encoding="utf-8") as f:
         json.dump(output_data, f, indent=2)
 
