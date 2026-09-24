@@ -97,10 +97,14 @@ def run_gh_graphql(payload: dict) -> dict:
             timeout=TIMEOUT_S,
         )
         data = json.loads(result.stdout)
+    except FileNotFoundError as e:
+        raise RuntimeError("gh not found on PATH") from e
     except subprocess.CalledProcessError as e:
         raise RuntimeError(f"gh graphql failed: {e.stderr}") from e
     except subprocess.TimeoutExpired as e:
         raise RuntimeError("gh graphql timed out") from e
+    except json.JSONDecodeError as e:
+        raise RuntimeError("gh graphql returned invalid JSON") from e
     if data.get("errors"):
         raise RuntimeError(f"GitHub GraphQL errors: {data['errors']}")
     if "data" not in data:
@@ -297,7 +301,7 @@ def build_github_context(owner: str, repo: str, pr_number: int, pr_url: str) -> 
             author, top_comment["body"], top_comment["url"]
         )
 
-        for item in decomposed:
+        for index, item in enumerate(decomposed):
             comments_to_process.append(
                 {
                     "type": "thread",
@@ -311,6 +315,8 @@ def build_github_context(owner: str, repo: str, pr_number: int, pr_url: str) -> 
                     "line": top_comment.get("line")
                     or top_comment.get("originalLine"),
                     "diffHunk": top_comment.get("diffHunk"),
+                    "findingIndex": index,
+                    "findingCount": len(decomposed),
                     "body": item["content"],
                     "title": item["title"],
                     "author": author,
@@ -348,6 +354,10 @@ def build_github_context(owner: str, repo: str, pr_number: int, pr_url: str) -> 
     }
 
 
+class GitLabNotFound(RuntimeError):
+    """A `glab api` call failed with HTTP 404."""
+
+
 def run_glab_api(
     host: str,
     endpoint: str,
@@ -369,15 +379,23 @@ def run_glab_api(
         result = subprocess.run(
             cmd, capture_output=True, text=True, check=True, timeout=TIMEOUT_S
         )
+    except FileNotFoundError as e:
+        raise RuntimeError("glab not found on PATH") from e
     except subprocess.CalledProcessError as e:
-        raise RuntimeError(f"glab api {endpoint} failed: {e.stderr or e.stdout}") from e
+        message = f"glab api {endpoint} failed: {e.stderr or e.stdout}"
+        if "404" in (e.stderr or ""):
+            raise GitLabNotFound(message) from e
+        raise RuntimeError(message) from e
     except subprocess.TimeoutExpired as e:
         raise RuntimeError(f"glab api {endpoint} timed out") from e
     if raw:
         return result.stdout
-    if paginate:
-        return [json.loads(line) for line in result.stdout.splitlines() if line.strip()]
-    return json.loads(result.stdout)
+    try:
+        if paginate:
+            return [json.loads(line) for line in result.stdout.splitlines() if line.strip()]
+        return json.loads(result.stdout)
+    except json.JSONDecodeError as e:
+        raise RuntimeError(f"glab api {endpoint} returned invalid JSON") from e
 
 
 def gitlab_project_endpoint(project_path: str) -> str:
@@ -435,7 +453,9 @@ class GitLabFileCache:
             try:
                 text = run_glab_api(self.host, endpoint, raw=True)
                 self._cache[key] = text.splitlines()
-            except RuntimeError:
+            except GitLabNotFound:
+                # Only a missing file/ref means the line is gone; other errors
+                # propagate so a flaky fetch never hides an active thread.
                 self._cache[key] = None
         return self._cache[key]
 
@@ -580,7 +600,7 @@ def build_gitlab_context(host: str, project_path: str, mr_iid: int, mr_url: str)
                 old_side=position.get("new_line") is None,
             )
 
-        for item in decomposed:
+        for index, item in enumerate(decomposed):
             comments_to_process.append(
                 {
                     "type": "thread",
@@ -593,6 +613,8 @@ def build_gitlab_context(host: str, project_path: str, mr_iid: int, mr_url: str)
                     "path": path,
                     "line": line,
                     "diffHunk": diff_hunk,
+                    "findingIndex": index,
+                    "findingCount": len(decomposed),
                     "body": item["content"],
                     "title": item["title"],
                     "author": author,
@@ -641,7 +663,7 @@ def current_branch_review_url() -> str | None:
         result = subprocess.run(
             cmd, capture_output=True, text=True, check=True, timeout=TIMEOUT_S
         )
-    except (subprocess.CalledProcessError, subprocess.TimeoutExpired):
+    except (FileNotFoundError, subprocess.CalledProcessError, subprocess.TimeoutExpired):
         print("Failed to get current pull/merge request.", file=sys.stderr)
         sys.exit(1)
     return json.loads(result.stdout).get(key)
@@ -656,14 +678,19 @@ def main(pr_url=None):
 
     github_match = GITHUB_PR_RE.search(pr_url)
     gitlab_match = GITLAB_MR_RE.search(pr_url)
-    if github_match:
-        owner, repo, pr_number = github_match.groups()
-        output_data = build_github_context(owner, repo, int(pr_number), pr_url)
-    elif gitlab_match:
-        host, project_path, mr_iid = gitlab_match.groups()
-        output_data = build_gitlab_context(host, project_path, int(mr_iid), pr_url)
-    else:
-        print(f"Invalid PR/MR URL: {pr_url}")
+    try:
+        if github_match:
+            owner, repo, pr_number = github_match.groups()
+            output_data = build_github_context(owner, repo, int(pr_number), pr_url)
+        elif gitlab_match:
+            host, project_path, mr_iid = gitlab_match.groups()
+            output_data = build_gitlab_context(host, project_path, int(mr_iid), pr_url)
+        else:
+            print(f"Invalid PR/MR URL: {pr_url}")
+            sys.exit(1)
+    except RuntimeError as e:
+        # Fail loudly rather than write a context file that is missing comments.
+        print(f"API error, no context written: {e}", file=sys.stderr)
         sys.exit(1)
 
     output_data["generated_at"] = datetime.now(timezone.utc).isoformat()

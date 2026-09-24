@@ -99,6 +99,9 @@ def main() -> None:
             sys.exit(f"Unknown provider in context file: {provider}")
     except RuntimeError as e:
         sys.exit(str(e))
+    except (KeyError, TypeError) as e:
+        # The API call succeeded but the response shape was unexpected.
+        sys.exit(f"Unexpected API response ({e!r}); the comment may have been posted, check before retrying.")
 
 
 if __name__ == "__main__":

@@ -31,9 +31,10 @@ Automate the analysis of pull/merge request comments. Use a Python script to gat
        - For `type: "general"` entries (issue comments / non-resolvable MR notes), and for GitLab threads started on the MR overview rather than a line, there is no `path`/`line`; rely on `body`, `title`, and repository state instead.
        - Check if the issue is still present and if the suggested fix makes sense in the current context.
        - For bot findings, look for "Prompt for AI Agents", "Committable suggestion" (GitHub `suggestion` blocks), or GitLab ```` ```suggestion:-0+0 ```` blocks in the comment body.
+     - **Multi-finding threads:** one bot comment can be split into several entries that share a `threadId` (`findingCount` > 1, `findingIndex` gives each entry's position). Resolving a thread closes all of its findings, so decide on every entry in the group first. Pass `--resolve` only when all of them are non-actionable. If any of them goes into `fixes.md`, send one reply covering the non-actionable findings without `--resolve`, and leave the thread open.
      - **If no code change is needed:**
        - Reply with `scripts/reply.py`, which works for both GitHub and GitLab using the context file:
-         - If it's a `thread` type, reply into the thread and resolve it:
+         - If it's a `thread` type, reply into the thread and resolve it (subject to the multi-finding rule above):
            ```bash
            python3 {skill_dir}/scripts/reply.py {context_file} --thread-id "{threadId}" --resolve --body "@{author} [Detailed explanation why the change is not needed or already addressed]"
            ```
@@ -42,7 +43,7 @@ Automate the analysis of pull/merge request comments. Use a Python script to gat
            python3 {skill_dir}/scripts/reply.py {context_file} --general --body "@{author} [Detailed explanation why the change is not needed or already addressed]"
            ```
    - If the user asks why comments are "still there," check `skipped_threads` before assuming the skill missed them. Outdated threads remain visible in GitHub/GitLab review history even when they no longer need action.
-   - After a separate implementation pass, do a second verification pass on any still-active unresolved threads. If the fix is now present in code, reply with the verification and resolve the thread instead of re-adding it to `fixes.md`.
+   - After a separate implementation pass, do a second verification pass on any still-active unresolved threads. If the fix is now present in code, reply with the verification and resolve the thread instead of re-adding it to `fixes.md`. Resolve a multi-finding thread only once every finding in it is fixed or answered.
      - **If a code change is needed:**
        - Append a detailed entry to `fixes.md`:
          - **Comment URL:** {url}
