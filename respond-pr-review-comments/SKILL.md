@@ -8,10 +8,10 @@ You take one optional argument: a GitHub pull request URL or a GitLab merge requ
 ## 1. Gather
 
 ```bash
-python3 {skill_dir}/scripts/analyze_pr.py [PR_OR_MR_URL] --out-dir <scratchpad or temp dir>
+python3 {skill_dir}/scripts/analyze_pr.py [PR_OR_MR_URL] [--out-dir <scratchpad>]
 ```
 
-It prints a summary and the path of the context file it wrote. Never write it into the repo or the skill folder. If the script fails or the PR/MR is not open (`pr_state`), tell the user and stop.
+It prints a summary and the path of the context file it wrote (without `--out-dir`, a new private temp directory; the file is always mode 0600). Never write it into the repo or the skill folder. If the script fails or the PR/MR is not open (`pr_state`), tell the user and stop.
 
 The context file's `provider` is `github` or `gitlab`. On GitLab, `threadId` is the discussion id and `pr_number` is the MR iid. It holds `comments` (to analyze) and `skipped_threads`: resolved or outdated threads, not analyzed, but list them if the user asks why comments are "still there". GitLab has no native outdated flag; the script marks a GitLab thread outdated when it was made on an older MR version and the commented line no longer exists unchanged in the current head.
 
@@ -35,7 +35,9 @@ Write `fixes.md` at the repo root (untracked; never commit it) with two sections
 - Verified plan: what to change and where, and which tests to run or add
 - Risks
 
-**Proposed replies**: one entry per comment that needs no code change: the URL, the reply text, and whether the thread will be resolved. Resolving closes every finding in a thread, so propose resolving only when none of its findings is in Fixes; otherwise the reply covers the answered findings and the thread stays open. Address the author as `@login` only for a real login.
+**Proposed replies**: one entry per comment that needs no code change but deserves an answer: the URL, the reply text, and whether the thread will be resolved. Resolving closes every finding in a thread, so propose resolving only when none of its findings is in Fixes; otherwise the reply covers the answered findings and the thread stays open. Address the author as `@login` only for a real login.
+
+**No reply needed**: list the rest with one line each on why: bot status, progress and promo posts, review wrappers and auto-approvals, and summaries that only repeat findings answered elsewhere. A reply there is only noise.
 
 Then stop and show the user the summary counts, the fixes and the proposed replies. **Post nothing and resolve nothing until the user approves**; they may edit, drop or move items between the sections.
 

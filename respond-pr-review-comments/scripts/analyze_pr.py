@@ -581,8 +581,8 @@ def current_branch_review_url() -> str | None:
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("pr_url", nargs="?", help="PR/MR URL (default: the current branch's PR/MR)")
-    parser.add_argument("--out-dir", default=tempfile.gettempdir(),
-                        help="directory for the context file (default: the system temp directory)")
+    parser.add_argument("--out-dir",
+                        help="directory for the context file (default: a new private temp directory)")
     args = parser.parse_args(argv)
 
     pr_url = args.pr_url or current_branch_review_url()
@@ -610,9 +610,18 @@ def main(argv=None):
     output_data["generated_at"] = datetime.now(timezone.utc).isoformat()
 
     slug = re.sub(r"[^A-Za-z0-9_.-]+", "-", f"{output_data['owner']}-{output_data['repo']}")
-    os.makedirs(args.out_dir, exist_ok=True)
-    out_path = os.path.join(args.out_dir, f"comments-context-{slug}-{output_data['pr_number']}.json")
-    with open(out_path, "w", encoding="utf-8") as f:
+    if args.out_dir:
+        os.makedirs(args.out_dir, exist_ok=True)
+        out_dir = args.out_dir
+    else:
+        out_dir = tempfile.mkdtemp(prefix="pr-review-")
+    out_path = os.path.join(out_dir, f"comments-context-{slug}-{output_data['pr_number']}.json")
+    # Private, and never through a symlink someone planted at the predictable name.
+    # Not O_EXCL: the skill re-runs the analysis into the same directory.
+    flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC | getattr(os, "O_NOFOLLOW", 0)
+    fd = os.open(out_path, flags, 0o600)
+    os.fchmod(fd, 0o600)  # the mode only applies when the file is created
+    with os.fdopen(fd, "w", encoding="utf-8") as f:
         json.dump(output_data, f, indent=2)
 
     print(json.dumps(output_data["summary"]))
