@@ -1,14 +1,16 @@
 #!/usr/bin/env python3
-"""Fetch PR/MR review threads and top-level comments for offline analysis.
+"""Fetch PR/MR review threads, review bodies and top-level comments for offline analysis.
 
 Supports GitHub pull requests (via `gh`) and GitLab merge requests (via `glab`).
 """
 
+import argparse
 import json
 import os
 import re
 import subprocess
 import sys
+import tempfile
 import urllib.parse
 from datetime import datetime, timezone
 
@@ -18,21 +20,7 @@ GITHUB_PR_RE = re.compile(r"github\.com/([^/]+)/([^/]+)/pull/(\d+)")
 GITLAB_MR_RE = re.compile(r"^https?://([^/]+)/(.+?)/-/merge_requests/(\d+)")
 HUNK_HEADER_RE = re.compile(r"^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@")
 
-THREAD_QUERY = """
-query($owner: String!, $repo: String!, $number: Int!, $cursor: String) {
-  repository(owner: $owner, name: $repo) {
-    pullRequest(number: $number) {
-      reviewThreads(first: 50, after: $cursor) {
-        pageInfo {
-          hasNextPage
-          endCursor
-        }
-        nodes {
-          id
-          isResolved
-          isOutdated
-          comments(first: 100) {
-            nodes {
+COMMENT_FIELDS = """
               id
               databaseId
               url
@@ -41,11 +29,39 @@ query($owner: String!, $repo: String!, $number: Int!, $cursor: String) {
               originalLine
               diffHunk
               body
+              createdAt
               author { login }
               replyTo { id }
-            }
+"""
+
+THREAD_QUERY = """
+query($owner: String!, $repo: String!, $number: Int!, $cursor: String) {
+  repository(owner: $owner, name: $repo) {
+    pullRequest(number: $number) {
+      reviewThreads(first: 50, after: $cursor) {
+        pageInfo { hasNextPage endCursor }
+        nodes {
+          id
+          isResolved
+          isOutdated
+          comments(first: 100) {
+            pageInfo { hasNextPage endCursor }
+            nodes {""" + COMMENT_FIELDS + """}
           }
         }
+      }
+    }
+  }
+}
+"""
+
+THREAD_COMMENTS_QUERY = """
+query($id: ID!, $cursor: String) {
+  node(id: $id) {
+    ... on PullRequestReviewThread {
+      comments(first: 100, after: $cursor) {
+        pageInfo { hasNextPage endCursor }
+        nodes {""" + COMMENT_FIELDS + """}
       }
     }
   }
@@ -57,17 +73,23 @@ query($owner: String!, $repo: String!, $number: Int!, $cursor: String) {
   repository(owner: $owner, name: $repo) {
     pullRequest(number: $number) {
       comments(first: 50, after: $cursor) {
-        pageInfo {
-          hasNextPage
-          endCursor
-        }
-        nodes {
-          id
-          databaseId
-          url
-          body
-          author { login }
-        }
+        pageInfo { hasNextPage endCursor }
+        nodes { id databaseId url body createdAt author { login } }
+      }
+    }
+  }
+}
+"""
+
+# Review bodies hold findings that are not inline threads (CodeRabbit's
+# nitpicks and "outside diff range" comments, Viper's summary-only findings).
+REVIEWS_QUERY = """
+query($owner: String!, $repo: String!, $number: Int!, $cursor: String) {
+  repository(owner: $owner, name: $repo) {
+    pullRequest(number: $number) {
+      reviews(first: 50, after: $cursor) {
+        pageInfo { hasNextPage endCursor }
+        nodes { id databaseId url body state createdAt author { login } }
       }
     }
   }
@@ -76,11 +98,9 @@ query($owner: String!, $repo: String!, $number: Int!, $cursor: String) {
 
 PR_BASE_QUERY = """
 query($owner: String!, $repo: String!, $number: Int!) {
+  viewer { login }
   repository(owner: $owner, name: $repo) {
-    pullRequest(number: $number) {
-      id
-      url
-    }
+    pullRequest(number: $number) { id url state headRefName headRefOid }
   }
 }
 """
@@ -112,245 +132,163 @@ def run_gh_graphql(payload: dict) -> dict:
     return data
 
 
-def fetch_review_threads(owner: str, repo: str, pr_number: int) -> list[dict]:
-    all_nodes: list[dict] = []
-    cursor: str | None = None
+def paginate(query: str, variables: dict, connection) -> list[dict]:
+    """Follow a GraphQL connection's cursor; `connection` picks it out of the response data."""
+    nodes: list[dict] = []
+    cursor = None
     while True:
-        variables = {
-            "owner": owner,
-            "repo": repo,
-            "number": pr_number,
-            "cursor": cursor,
-        }
-        data = run_gh_graphql({"query": THREAD_QUERY, "variables": variables})
-        pr = (data["data"].get("repository") or {}).get("pullRequest") or {}
-        conn = pr.get("reviewThreads") or {}
-        all_nodes.extend(conn.get("nodes") or [])
+        data = run_gh_graphql({"query": query, "variables": dict(variables, cursor=cursor)})
+        conn = connection(data["data"]) or {}
+        nodes.extend(conn.get("nodes") or [])
         pinfo = conn.get("pageInfo") or {}
         if not pinfo.get("hasNextPage"):
-            break
+            return nodes
         cursor = pinfo.get("endCursor")
         if not cursor:
-            raise RuntimeError(
-                "GitHub GraphQL pagination inconsistency in fetch_review_threads: "
-                f"hasNextPage=true but endCursor missing; pageInfo={pinfo!r}"
-            )
-    return all_nodes
+            raise RuntimeError(f"hasNextPage=true but endCursor missing; pageInfo={pinfo!r}")
 
 
-def fetch_issue_comments(owner: str, repo: str, pr_number: int) -> list[dict]:
-    all_nodes: list[dict] = []
-    cursor: str | None = None
-    while True:
-        variables = {
-            "owner": owner,
-            "repo": repo,
-            "number": pr_number,
-            "cursor": cursor,
-        }
-        data = run_gh_graphql({"query": COMMENTS_QUERY, "variables": variables})
-        pr = (data["data"].get("repository") or {}).get("pullRequest") or {}
-        conn = pr.get("comments") or {}
-        all_nodes.extend(conn.get("nodes") or [])
-        pinfo = conn.get("pageInfo") or {}
-        if not pinfo.get("hasNextPage"):
-            break
-        cursor = pinfo.get("endCursor")
-        if not cursor:
-            raise RuntimeError(
-                "GitHub GraphQL pagination inconsistency in fetch_issue_comments: "
-                f"hasNextPage=true but endCursor missing; pageInfo={pinfo!r}"
-            )
-    return all_nodes
+def pull_request(data: dict, field: str):
+    return (((data.get("repository") or {}).get("pullRequest")) or {}).get(field)
 
 
-def fetch_pr_base(owner: str, repo: str, pr_number: int) -> dict | None:
-    data = run_gh_graphql(
-        {
-            "query": PR_BASE_QUERY,
-            "variables": {
-                "owner": owner,
-                "repo": repo,
-                "number": pr_number,
-            },
-        }
+def fetch_review_threads(variables: dict) -> list[dict]:
+    threads = paginate(THREAD_QUERY, variables, lambda d: pull_request(d, "reviewThreads"))
+    for thread in threads:
+        conn = thread.get("comments") or {}
+        if (conn.get("pageInfo") or {}).get("hasNextPage"):
+            # the first page came with the thread; fetch the whole thread again by id
+            conn["nodes"] = paginate(THREAD_COMMENTS_QUERY, {"id": thread["id"]},
+                                     lambda d: (d.get("node") or {}).get("comments"))
+    return threads
+
+
+def mentioned_later(author: str, created_at: str, comments: list[dict], viewer: str) -> bool:
+    """True if the viewer posted a top-level comment after `created_at` that @-mentions `author`."""
+    pattern = re.compile(r"@" + re.escape(author) + r"\b", re.IGNORECASE)
+    return any(
+        c["author"] == viewer and c["createdAt"] > created_at and pattern.search(c["body"] or "")
+        for c in comments
     )
-    repo_data = data["data"].get("repository")
-    if not repo_data:
-        return None
-    return repo_data.get("pullRequest")
 
 
-def decompose_bot_comment(author, body, url):
-    """Split large bot comments into multiple actionable items."""
-    items = []
-    normalized_author = (author or "").lower().replace("[bot]", "")
-    cleaned_body = re.sub(r"^\s*<!--.*?-->\s*", "", body, flags=re.DOTALL)
-    if normalized_author in ["coderabbitai", "codeant-ai", "viper-review"]:
-        findings = re.findall(
-            r"(?:###|####|\*\*)\s*(.*?)\n(.*?)(?=\n(?:###|####|\*\*)|$)",
-            cleaned_body,
-            re.DOTALL,
-        )
-        for title, content in findings:
-            normalized_title = title.lower()
-            if any(
-                k in normalized_title
-                for k in [
-                    "actionable",
-                    "nitpick",
-                    "potential issue",
-                    "suggestion",
-                    "finding",
-                ]
-            ):
-                items.append(
-                    {
-                        "title": title.strip(),
-                        "content": content.strip(),
-                    }
-                )
+def top_level_entries(kind: str, items: list[dict], answers: list[dict], viewer: str, summary: dict) -> list[dict]:
+    """Context entries for review bodies or top-level comments, without the viewer's own.
 
-        # Many review bots also emit single finding comments like:
-        # "[High] message..."
-        if not items:
-            severity_match = re.match(
-                r"^\s*(\[[^\]]+\])\s*(.+?)\s*$", cleaned_body, re.DOTALL
-            )
-            if severity_match:
-                severity, content = severity_match.groups()
-                items.append(
-                    {
-                        "title": severity.strip(),
-                        "content": content.strip(),
-                    }
-                )
+    `items` and `answers` are dicts with author, body, createdAt, url and databaseId.
+    """
+    entries = []
+    for item in items:
+        if item["author"] == viewer or not (item["body"] or "").strip():
+            continue
+        hint = mentioned_later(item["author"], item["createdAt"], answers, viewer)
+        summary["review_bodies" if kind == "review" else "issue_comments"] += 1
+        summary["mentioned_later"] += hint
+        entries.append(dict(item, type=kind, viewer_mentioned_author_later=hint))
+    return entries
 
-    if not items:
-        items.append({"title": "General Comment", "content": body})
-    return items
+
+def github_login(node: dict) -> str:
+    return (node.get("author") or {}).get("login") or "ghost"
 
 
 def build_github_context(owner: str, repo: str, pr_number: int, pr_url: str) -> dict:
-    pr_node = fetch_pr_base(owner, repo, pr_number)
+    variables = {"owner": owner, "repo": repo, "number": pr_number}
+    base = run_gh_graphql({"query": PR_BASE_QUERY, "variables": variables})["data"]
+    pr_node = (base.get("repository") or {}).get("pullRequest")
     if not pr_node:
-        print("Pull request not found.")
+        print("Pull request not found.", file=sys.stderr)
         sys.exit(1)
+    viewer = base["viewer"]["login"]
 
-    pr_id = pr_node["id"]
-    thread_nodes = fetch_review_threads(owner, repo, pr_number)
-    comment_nodes = fetch_issue_comments(owner, repo, pr_number)
+    thread_nodes = fetch_review_threads(variables)
+    comment_nodes = paginate(COMMENTS_QUERY, variables, lambda d: pull_request(d, "comments"))
+    review_nodes = paginate(REVIEWS_QUERY, variables, lambda d: pull_request(d, "reviews"))
 
     comments_to_process = []
     skipped_threads = []
-    summary = {
-        "threads_total": len(thread_nodes),
-        "threads_resolved": 0,
-        "threads_outdated": 0,
-        "threads_active_unresolved": 0,
-        "issue_comments_total": len(comment_nodes),
-    }
+    summary = new_summary(len(thread_nodes))
 
     for thread in thread_nodes:
         is_resolved = bool(thread.get("isResolved"))
         is_outdated = bool(thread.get("isOutdated"))
-
-        if is_resolved:
-            summary["threads_resolved"] += 1
-        elif is_outdated:
-            summary["threads_outdated"] += 1
-        else:
-            summary["threads_active_unresolved"] += 1
+        comments = (thread.get("comments") or {}).get("nodes") or []
+        if not comments:
+            continue
+        # The root comment is the one that has no replyTo
+        root = next((c for c in comments if c.get("replyTo") is None), comments[0])
+        line = root.get("line") or root.get("originalLine")
 
         if is_resolved or is_outdated:
-            all_comments = (thread.get("comments") or {}).get("nodes", [])
-            top_comment = next(
-                (comment for comment in all_comments if comment.get("replyTo") is None),
-                all_comments[0] if all_comments else None,
-            )
-            skipped_threads.append(
-                {
-                    "threadId": thread["id"],
-                    "isResolved": is_resolved,
-                    "isOutdated": is_outdated,
-                    "url": top_comment.get("url") if top_comment else None,
-                    "path": top_comment.get("path") if top_comment else None,
-                    "line": (
-                        top_comment.get("line") or top_comment.get("originalLine")
-                        if top_comment
-                        else None
-                    ),
-                }
-            )
+            summary["threads_resolved" if is_resolved else "threads_outdated"] += 1
+            skipped_threads.append({"threadId": thread["id"], "isResolved": is_resolved,
+                                    "isOutdated": is_outdated, "url": root["url"],
+                                    "path": root.get("path"), "line": line})
             continue
 
-        all_comments = (thread.get("comments") or {}).get("nodes", [])
-        if not all_comments:
-            continue
+        summary["threads_active_unresolved"] += 1
+        replies = [{"author": github_login(c), "body": c["body"], "createdAt": c["createdAt"]}
+                   for c in comments if c is not root]
+        comments_to_process.append(thread_entry(
+            thread["id"], root["databaseId"], root["url"], root.get("path"), line,
+            root.get("diffHunk"), github_login(root), root["body"], replies, viewer, summary))
 
-        # The root comment is the one that has no replyTo
-        top_comments = [c for c in all_comments if c.get("replyTo") is None]
-        if not top_comments:
-            # Fallback to first comment if no replyTo is found (shouldn't happen)
-            top_comment = all_comments[0]
-        else:
-            top_comment = top_comments[0]
-        author = top_comment["author"]["login"] if top_comment.get("author") else "ghost"
+    def top_level(node):
+        return {"databaseId": node["databaseId"], "url": node["url"], "author": github_login(node),
+                "createdAt": node["createdAt"], "body": node["body"]}
 
-        decomposed = decompose_bot_comment(
-            author, top_comment["body"], top_comment["url"]
-        )
-
-        for index, item in enumerate(decomposed):
-            comments_to_process.append(
-                {
-                    "type": "thread",
-                    "threadId": thread["id"],
-                    "isResolved": is_resolved,
-                    "isOutdated": is_outdated,
-                    "id": top_comment["id"],
-                    "databaseId": top_comment["databaseId"],
-                    "url": top_comment["url"],
-                    "path": top_comment.get("path"),
-                    "line": top_comment.get("line")
-                    or top_comment.get("originalLine"),
-                    "diffHunk": top_comment.get("diffHunk"),
-                    "findingIndex": index,
-                    "findingCount": len(decomposed),
-                    "body": item["content"],
-                    "title": item["title"],
-                    "author": author,
-                }
-            )
-
-    for comment in comment_nodes:
-        author = comment["author"]["login"] if comment.get("author") else "ghost"
-        decomposed = decompose_bot_comment(author, comment["body"], comment["url"])
-
-        for item in decomposed:
-            comments_to_process.append(
-                {
-                    "type": "general",
-                    "id": comment["id"],
-                    "databaseId": comment["databaseId"],
-                    "url": comment["url"],
-                    "body": item["content"],
-                    "title": item["title"],
-                    "author": author,
-                }
-            )
+    answers = [top_level(c) for c in comment_nodes]
+    reviews = [dict(top_level(r), state=r["state"]) for r in review_nodes]
+    comments_to_process += top_level_entries("review", reviews, answers, viewer, summary)
+    comments_to_process += top_level_entries("general", answers, answers, viewer, summary)
 
     return {
         "provider": "github",
         "host": "github.com",
         "owner": owner,
         "repo": repo,
-        "pr_url": pr_url,
+        "pr_url": pr_node["url"],
         "pr_number": pr_number,
-        "pr_id": pr_id,
+        "pr_id": pr_node["id"],
+        "pr_state": pr_node["state"],
+        "head_ref": pr_node["headRefName"],
+        "head_oid": pr_node["headRefOid"],
+        "viewer": viewer,
         "summary": summary,
         "skipped_threads": skipped_threads,
         "comments": comments_to_process,
+    }
+
+
+def new_summary(threads_total: int) -> dict:
+    return {
+        "threads_total": threads_total,
+        "threads_resolved": 0,
+        "threads_outdated": 0,
+        "threads_active_unresolved": 0,
+        "threads_last_reply_by_viewer": 0,
+        "review_bodies": 0,
+        "issue_comments": 0,
+        "mentioned_later": 0,
+    }
+
+
+def thread_entry(thread_id, database_id, url, path, line, diff_hunk, author, body, replies, viewer, summary) -> dict:
+    """A context entry for an active unresolved thread, with all its replies."""
+    last_by_viewer = bool(replies) and replies[-1]["author"] == viewer
+    summary["threads_last_reply_by_viewer"] += last_by_viewer
+    return {
+        "type": "thread",
+        "threadId": thread_id,
+        "databaseId": database_id,
+        "url": url,
+        "path": path,
+        "line": line,
+        "diffHunk": diff_hunk,
+        "author": author,
+        "body": body,
+        "replies": replies,
+        "last_reply_by_viewer": last_by_viewer,
     }
 
 
@@ -512,6 +450,7 @@ def build_gitlab_context(host: str, project_path: str, mr_iid: int, mr_url: str)
     except RuntimeError as e:
         print(f"Merge request not found: {e}", file=sys.stderr)
         sys.exit(1)
+    viewer = run_glab_api(host, "user")["username"]
 
     web_url = mr.get("web_url") or mr_url
     head_sha = (mr.get("diff_refs") or {}).get("head_sha") or mr.get("sha")
@@ -523,15 +462,13 @@ def build_gitlab_context(host: str, project_path: str, mr_iid: int, mr_url: str)
     diffs_by_path = fetch_gitlab_mr_diffs(host, project_ep, mr_iid)
     files = GitLabFileCache(host, project_ep)
 
+    def gitlab_login(note):
+        return (note.get("author") or {}).get("username") or "ghost"
+
     comments_to_process = []
     skipped_threads = []
-    summary = {
-        "threads_total": 0,
-        "threads_resolved": 0,
-        "threads_outdated": 0,
-        "threads_active_unresolved": 0,
-        "issue_comments_total": 0,
-    }
+    general_notes = []
+    summary = new_summary(0)
 
     for discussion in discussions:
         # System notes ("added 1 commit", "changed the description") are events, not comments.
@@ -539,24 +476,11 @@ def build_gitlab_context(host: str, project_path: str, mr_iid: int, mr_url: str)
         if not notes:
             continue
         top_note = notes[0]
-        author = (top_note.get("author") or {}).get("username") or "ghost"
         url = f"{web_url}#note_{top_note['id']}"
-        decomposed = decompose_bot_comment(author, top_note.get("body") or "", url)
 
         if discussion.get("individual_note") or not top_note.get("resolvable"):
-            summary["issue_comments_total"] += 1
-            for item in decomposed:
-                comments_to_process.append(
-                    {
-                        "type": "general",
-                        "id": top_note["id"],
-                        "databaseId": top_note["id"],
-                        "url": url,
-                        "body": item["content"],
-                        "title": item["title"],
-                        "author": author,
-                    }
-                )
+            general_notes.append({"databaseId": top_note["id"], "url": url, "author": gitlab_login(top_note),
+                                  "createdAt": top_note["created_at"], "body": top_note.get("body") or ""})
             continue
 
         summary["threads_total"] += 1
@@ -572,14 +496,8 @@ def build_gitlab_context(host: str, project_path: str, mr_iid: int, mr_url: str)
         elif position:
             line = position.get("new_line") or position.get("old_line")
 
-        if is_resolved:
-            summary["threads_resolved"] += 1
-        elif is_outdated:
-            summary["threads_outdated"] += 1
-        else:
-            summary["threads_active_unresolved"] += 1
-
         if is_resolved or is_outdated:
+            summary["threads_resolved" if is_resolved else "threads_outdated"] += 1
             skipped_threads.append(
                 {
                     "threadId": discussion["id"],
@@ -592,6 +510,7 @@ def build_gitlab_context(host: str, project_path: str, mr_iid: int, mr_url: str)
             )
             continue
 
+        summary["threads_active_unresolved"] += 1
         diff_hunk = None
         if position and path in diffs_by_path and line:
             diff_hunk = extract_hunk(
@@ -599,27 +518,13 @@ def build_gitlab_context(host: str, project_path: str, mr_iid: int, mr_url: str)
                 line,
                 old_side=position.get("new_line") is None,
             )
+        replies = [{"author": gitlab_login(n), "body": n.get("body") or "", "createdAt": n["created_at"]}
+                   for n in notes[1:]]
+        comments_to_process.append(thread_entry(
+            discussion["id"], top_note["id"], url, path, line, diff_hunk,
+            gitlab_login(top_note), top_note.get("body") or "", replies, viewer, summary))
 
-        for index, item in enumerate(decomposed):
-            comments_to_process.append(
-                {
-                    "type": "thread",
-                    "threadId": discussion["id"],
-                    "isResolved": is_resolved,
-                    "isOutdated": is_outdated,
-                    "id": top_note["id"],
-                    "databaseId": top_note["id"],
-                    "url": url,
-                    "path": path,
-                    "line": line,
-                    "diffHunk": diff_hunk,
-                    "findingIndex": index,
-                    "findingCount": len(decomposed),
-                    "body": item["content"],
-                    "title": item["title"],
-                    "author": author,
-                }
-            )
+    comments_to_process += top_level_entries("general", general_notes, general_notes, viewer, summary)
 
     namespace, _, repo = project_path.rpartition("/")
     return {
@@ -631,6 +536,10 @@ def build_gitlab_context(host: str, project_path: str, mr_iid: int, mr_url: str)
         "pr_url": web_url,
         "pr_number": mr_iid,
         "pr_id": mr.get("id"),
+        "pr_state": mr.get("state"),
+        "head_ref": mr.get("source_branch"),
+        "head_oid": head_sha,
+        "viewer": viewer,
         "summary": summary,
         "skipped_threads": skipped_threads,
         "comments": comments_to_process,
@@ -669,12 +578,17 @@ def current_branch_review_url() -> str | None:
     return json.loads(result.stdout).get(key)
 
 
-def main(pr_url=None):
+def main(argv=None):
+    parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    parser.add_argument("pr_url", nargs="?", help="PR/MR URL (default: the current branch's PR/MR)")
+    parser.add_argument("--out-dir", default=tempfile.gettempdir(),
+                        help="directory for the context file (default: the system temp directory)")
+    args = parser.parse_args(argv)
+
+    pr_url = args.pr_url or current_branch_review_url()
     if not pr_url:
-        pr_url = current_branch_review_url()
-        if not pr_url:
-            print("No pull/merge request found for the current branch.")
-            sys.exit(0)
+        print("No pull/merge request found for the current branch.")
+        sys.exit(0)
 
     github_match = GITHUB_PR_RE.search(pr_url)
     gitlab_match = GITLAB_MR_RE.search(pr_url)
@@ -695,14 +609,15 @@ def main(pr_url=None):
 
     output_data["generated_at"] = datetime.now(timezone.utc).isoformat()
 
-    filename = f"comments-context-{output_data['pr_number']}.json"
-    out_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), filename)
+    slug = re.sub(r"[^A-Za-z0-9_.-]+", "-", f"{output_data['owner']}-{output_data['repo']}")
+    os.makedirs(args.out_dir, exist_ok=True)
+    out_path = os.path.join(args.out_dir, f"comments-context-{slug}-{output_data['pr_number']}.json")
     with open(out_path, "w", encoding="utf-8") as f:
         json.dump(output_data, f, indent=2)
 
+    print(json.dumps(output_data["summary"]))
     print(f"Context saved to {out_path}")
 
 
 if __name__ == "__main__":
-    url_arg = sys.argv[1] if len(sys.argv) > 1 else None
-    main(url_arg)
+    main()
