@@ -103,7 +103,9 @@ def github_reply(ctx: dict, entry: dict, body: str, resolve: bool) -> None:
                  f"(state {comment['state']}); check it on GitHub")
     print(f"Replied in thread: {comment['url']}")
 
-    if resolve and not thread["isResolved"]:
+    if resolve and thread["isResolved"]:
+        print(f"Thread {thread_id} was already resolved")
+    elif resolve:
         newer_replies(entry, thread["comments"]["totalCount"])
         run_gh_graphql({"query": GITHUB_RESOLVE_THREAD, "variables": {"id": thread_id}})
         print(f"Resolved thread {thread_id}")
