@@ -238,7 +238,9 @@ def build_github_context(owner: str, repo: str, pr_number: int, pr_url: str) -> 
                 "createdAt": node["createdAt"], "body": node["body"]}
 
     answers = [top_level(c) for c in comment_nodes]
-    reviews = [dict(top_level(r), state=r["state"]) for r in review_nodes]
+    # A dismissed review's findings were set aside on purpose.
+    summary["reviews_dismissed"] = sum(r["state"] == "DISMISSED" for r in review_nodes)
+    reviews = [dict(top_level(r), state=r["state"]) for r in review_nodes if r["state"] != "DISMISSED"]
     comments_to_process += top_level_entries("review", reviews, answers, viewer, summary)
     comments_to_process += top_level_entries("general", answers, answers, viewer, summary)
 
@@ -273,8 +275,12 @@ def new_summary(threads_total: int) -> dict:
     }
 
 
-def thread_entry(thread_id, database_id, url, path, line, diff_hunk, author, body, replies, viewer, summary) -> dict:
-    """A context entry for an active unresolved thread, with all its replies."""
+def thread_entry(thread_id, database_id, url, path, line, diff_hunk, author, body, replies, viewer, summary,
+                 resolvable=True) -> dict:
+    """A context entry for an active unresolved thread, with all its replies.
+
+    `commentCount` lets reply.py notice replies that arrived after the analysis.
+    """
     last_by_viewer = bool(replies) and replies[-1]["author"] == viewer
     summary["threads_last_reply_by_viewer"] += last_by_viewer
     return {
@@ -288,6 +294,8 @@ def thread_entry(thread_id, database_id, url, path, line, diff_hunk, author, bod
         "author": author,
         "body": body,
         "replies": replies,
+        "commentCount": 1 + len(replies),
+        "resolvable": resolvable,
         "last_reply_by_viewer": last_by_viewer,
     }
 
@@ -478,7 +486,7 @@ def build_gitlab_context(host: str, project_path: str, mr_iid: int, mr_url: str)
         top_note = notes[0]
         url = f"{web_url}#note_{top_note['id']}"
 
-        if discussion.get("individual_note") or not top_note.get("resolvable"):
+        if discussion.get("individual_note"):
             general_notes.append({"databaseId": top_note["id"], "url": url, "author": gitlab_login(top_note),
                                   "createdAt": top_note["created_at"], "body": top_note.get("body") or ""})
             continue
@@ -486,10 +494,15 @@ def build_gitlab_context(host: str, project_path: str, mr_iid: int, mr_url: str)
         summary["threads_total"] += 1
         position = top_note.get("position")
         path = (position or {}).get("new_path") or (position or {}).get("old_path")
-        is_resolved = all(n.get("resolved") for n in notes if n.get("resolvable"))
+        # A discussion that cannot be resolved (e.g. replies to a plain comment) is
+        # still a thread: answers belong in it. It is never resolved or outdated.
+        resolvable = bool(top_note.get("resolvable"))
+        is_resolved = resolvable and all(n.get("resolved") for n in notes if n.get("resolvable"))
         is_outdated = False
         line = None
-        if not is_resolved:
+        if not resolvable:
+            line = (position or {}).get("new_line") or (position or {}).get("old_line")
+        elif not is_resolved:
             is_outdated, line = gitlab_position_status(
                 position, head_sha, diffs_by_path, files
             )
@@ -522,7 +535,7 @@ def build_gitlab_context(host: str, project_path: str, mr_iid: int, mr_url: str)
                    for n in notes[1:]]
         comments_to_process.append(thread_entry(
             discussion["id"], top_note["id"], url, path, line, diff_hunk,
-            gitlab_login(top_note), top_note.get("body") or "", replies, viewer, summary))
+            gitlab_login(top_note), top_note.get("body") or "", replies, viewer, summary, resolvable))
 
     comments_to_process += top_level_entries("general", general_notes, general_notes, viewer, summary)
 
@@ -620,7 +633,8 @@ def main(argv=None):
     # Not O_EXCL: the skill re-runs the analysis into the same directory.
     flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC | getattr(os, "O_NOFOLLOW", 0)
     fd = os.open(out_path, flags, 0o600)
-    os.fchmod(fd, 0o600)  # the mode only applies when the file is created
+    if hasattr(os, "fchmod"):  # Unix only; the mode only applies when the file is created
+        os.fchmod(fd, 0o600)
     with os.fdopen(fd, "w", encoding="utf-8") as f:
         json.dump(output_data, f, indent=2)
 

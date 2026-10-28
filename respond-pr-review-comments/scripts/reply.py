@@ -39,7 +39,7 @@ mutation($id: ID!, $body: String!) {
 GITHUB_THREAD_LAST_COMMENTS = """
 query($id: ID!) {
   node(id: $id) {
-    ... on PullRequestReviewThread { isResolved comments(last: 5) { nodes { id } } }
+    ... on PullRequestReviewThread { isResolved comments(last: 100) { totalCount nodes { id } } }
   }
 }
 """
@@ -67,6 +67,13 @@ def quote(entry: dict) -> str:
     lines = [ln for ln in text.strip().splitlines() if ln.strip()][:3]
     quoted = "\n".join("> " + ln for ln in lines)
     return f"{quoted}\n>\n> ([{entry['author']}'s comment]({entry['url']}))\n\n"
+
+
+def newer_replies(entry: dict, count: int) -> None:
+    """Exit without resolving if the thread gained replies since the analysis (besides ours)."""
+    if count > entry["commentCount"] + 1:
+        sys.exit(f"Not resolved: {count - entry['commentCount'] - 1} new reply(ies) arrived after the "
+                 "analysis. Run analyze_pr.py again and review them first.")
 
 
 def github_reply(ctx: dict, entry: dict, body: str, resolve: bool) -> None:
@@ -97,6 +104,7 @@ def github_reply(ctx: dict, entry: dict, body: str, resolve: bool) -> None:
     print(f"Replied in thread: {comment['url']}")
 
     if resolve and not thread["isResolved"]:
+        newer_replies(entry, thread["comments"]["totalCount"])
         run_gh_graphql({"query": GITHUB_RESOLVE_THREAD, "variables": {"id": thread_id}})
         print(f"Resolved thread {thread_id}")
 
@@ -112,6 +120,8 @@ def gitlab_reply(ctx: dict, entry: dict, body: str, resolve: bool) -> None:
     note = run_glab_api(host, f"{discussion_ep}/notes", method="POST", fields={"body": body})
     print(f"Replied in thread: {ctx['pr_url']}#note_{note['id']}")
     if resolve:
+        discussion = run_glab_api(host, discussion_ep)
+        newer_replies(entry, sum(not n.get("system") for n in discussion.get("notes") or []))
         run_glab_api(host, discussion_ep, method="PUT", fields={"resolved": "true"})
         print(f"Resolved discussion {entry['threadId']}")
 
@@ -132,6 +142,8 @@ def main() -> None:
         parser.error(f"no entry with url {args.url} in {args.context_file}")
     if args.resolve and entry["type"] != "thread":
         parser.error("--resolve only applies to thread entries")
+    if args.resolve and not entry.get("resolvable", True):
+        parser.error("this discussion cannot be resolved; reply without --resolve")
 
     if args.body_file == "-":
         body = sys.stdin.read()

@@ -16,11 +16,11 @@ It prints a summary and the path of the context file it wrote (without `--out-di
 The context file's `provider` is `github` or `gitlab`. On GitLab, `threadId` is the discussion id and `pr_number` is the MR iid. It holds `comments` (to analyze) and `skipped_threads`: resolved or outdated threads, not analyzed, but list them if the user asks why comments are "still there". GitLab has no native outdated flag; the script marks a GitLab thread outdated when it was made on an older MR version and the commented line no longer exists unchanged in the current head.
 
 Entry types in `comments`:
-- `thread`: an active unresolved thread, with `path`/`line`/`diffHunk` when it is on a line, the root `body`, and all `replies`. `last_reply_by_viewer: true` means the user already answered it; check whether the reviewer accepted before doing more.
-- `review` (GitHub only): a review body. Bots put findings here that are not inline threads (CodeRabbit nitpicks and outside-diff comments, Viper summary findings).
+- `thread`: an active unresolved thread, with `path`/`line`/`diffHunk` when it is on a line, the root `body`, and all `replies`. `resolvable: false` marks a GitLab discussion that cannot be resolved (replies to a plain comment); answer it in the thread all the same. `last_reply_by_viewer: true` means the user already answered it; check whether the reviewer accepted before doing more.
+- `review` (GitHub only): a review body (dismissed reviews are left out). Bots put findings here that are not inline threads (CodeRabbit nitpicks and outside-diff comments, Viper summary findings).
 - `general`: a top-level comment, or a GitLab note that cannot be resolved.
 
-The user's own comments are already excluded. `viewer_mentioned_author_later` is only a hint that the user later @-mentioned that author, not proof that this comment was answered.
+The user's own review bodies and top-level comments are excluded. Threads the user started stay, since a reviewer may have replied in them; act only on what others wrote there. `viewer_mentioned_author_later` is only a hint that the user later @-mentioned that author, not proof that this comment was answered.
 
 ## 2. Verify
 
@@ -49,7 +49,7 @@ Post each approved reply with the helper, never with `gh pr comment`, `gh api`, 
 python3 {skill_dir}/scripts/reply.py <context file> <entry url> --body-file <reply.md> [--resolve]
 ```
 
-- `thread`: replies inside the thread, then resolves it with `--resolve`. On GitHub it checks the reply is visible in the thread, and refuses if the user has a pending review on the PR, which would hold the reply hidden until submitted; tell the user to submit or discard that review.
+- `thread`: replies inside the thread, then resolves it with `--resolve`. It does not resolve a thread that gained replies after the analysis, or one marked `resolvable: false`; run the analysis again and review the new replies. On GitHub it checks the reply is visible in the thread, and refuses if the user has a pending review on the PR, which would hold the reply hidden until submitted; tell the user to submit or discard that review.
 - `review` / `general`: neither GitHub nor GitLab can reply to these, so it posts a top-level comment that quotes and links the original. `--resolve` is refused.
 
 If the helper exits with an error, report it to the user; do not post another way.
