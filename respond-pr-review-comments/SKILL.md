@@ -1,69 +1,61 @@
 ---
 name: respond-pr-review-comments
-description: Analyze top-level pull request (GitHub) or merge request (GitLab) review comments using an automated script, resolve non-actionable comments, and create a plan for those requiring code changes.
+description: Analyze a GitHub pull request's or GitLab merge request's open review comments (threads, review bodies, top-level comments), verify each against the code, and produce a fixes.md plan plus proposed replies for the user to review before anything is posted or resolved.
 ---
 
 You take one optional argument: a GitHub pull request URL or a GitLab merge request URL (including self-hosted GitLab). Without it, the PR/MR for the current branch is used (`gh` for GitHub remotes, `glab` otherwise).
 
-## Goal
+## 1. Gather
 
-Automate the analysis of pull/merge request comments. Use a Python script to gather active comments and their context, then use AI to decide whether each needs a code change.
+```bash
+python3 {skill_dir}/scripts/analyze_pr.py [PR_OR_MR_URL] [--out-dir <scratchpad>]
+```
 
-- Non-actionable comments: Reply and resolve the thread immediately.
-- Actionable comments: Add to a `fixes.md` file with a concrete implementation plan.
+It prints a summary and the path of the context file it wrote (without `--out-dir`, a new private temp directory; the file is always mode 0600). Never write it into the repo or the skill folder. If the script fails or the PR/MR is not open (`pr_state`), tell the user and stop.
 
-## Steps
+The context file's `provider` is `github` or `gitlab`. On GitLab, `threadId` is the discussion id and `pr_number` is the MR iid. It holds `comments` (to analyze) and `skipped_threads`: resolved or outdated threads, not analyzed, but list them if the user asks why comments are "still there". GitLab has no native outdated flag; the script marks a GitLab thread outdated when it was made on an older MR version and the commented line no longer exists unchanged in the current head.
 
-1. **Gather Context:**
-   - Run the analysis script from this skill's `scripts/` directory: `python3 {skill_dir}/scripts/analyze_pr.py [PR_OR_MR_URL]`
-   - The script prints the path of the context file it wrote (`{skill_dir}/scripts/comments-context-{pr_number}.json`). Use that exact path below. If the script terminates without generating this file (e.g., no open PR/MR), inform the user and stop.
-   - The context file's `provider` field is `github` or `gitlab`. On GitLab, `threadId` is the discussion id and `pr_number` is the MR iid.
-   - Read the `summary` first. This distinguishes:
-     - `threads_active_unresolved`: still need action or explicit resolution.
-     - `threads_outdated`: still visible on GitHub/GitLab, but already superseded by code changes and intentionally skipped. GitLab has no native outdated flag; the script marks a GitLab thread outdated when it was made on an older MR version and the commented line no longer exists unchanged in the current head.
-     - `threads_resolved`: already closed threads.
+Entry types in `comments`:
+- `thread`: an active unresolved thread, with `path`/`line`/`diffHunk` when it is on a line, the root `body`, and all `replies`. `resolvable: false` marks a GitLab discussion that cannot be resolved (replies to a plain comment); answer it in the thread all the same. `last_reply_by_viewer: true` means the user already answered it; check whether the reviewer accepted before doing more.
+- `review` (GitHub only): a review body (dismissed reviews are left out). Bots put findings here that are not inline threads (CodeRabbit nitpicks and outside-diff comments, Viper summary findings).
+- `general`: a top-level comment, or a GitLab note that cannot be resolved.
 
-2. **Process Comments:**
-   - Read the context file.
-   - For each comment in the `comments` list:
-     - **Analyze & Verify:** 
-       - For `type: "thread"` entries, read the file at `path` near `line` when `path` is present.
-       - For `type: "general"` entries (issue comments / non-resolvable MR notes), and for GitLab threads started on the MR overview rather than a line, there is no `path`/`line`; rely on `body`, `title`, and repository state instead.
-       - Check if the issue is still present and if the suggested fix makes sense in the current context.
-       - For bot findings, look for "Prompt for AI Agents", "Committable suggestion" (GitHub `suggestion` blocks), or GitLab ```` ```suggestion:-0+0 ```` blocks in the comment body.
-     - **Multi-finding threads:** one bot comment can be split into several entries that share a `threadId` (`findingCount` > 1, `findingIndex` gives each entry's position). Resolving a thread closes all of its findings, so decide on every entry in the group first. Pass `--resolve` only when all of them are non-actionable. If any of them goes into `fixes.md`, send one reply covering the non-actionable findings without `--resolve`, and leave the thread open.
-     - **If no code change is needed:**
-       - Reply with `scripts/reply.py`, which works for both GitHub and GitLab using the context file:
-         - If it's a `thread` type, reply into the thread and resolve it (subject to the multi-finding rule above):
-           ```bash
-           python3 {skill_dir}/scripts/reply.py {context_file} --thread-id "{threadId}" --resolve --body "@{author} [Detailed explanation why the change is not needed or already addressed]"
-           ```
-         - If it's a `general` type, post a top-level comment:
-           ```bash
-           python3 {skill_dir}/scripts/reply.py {context_file} --general --body "@{author} [Detailed explanation why the change is not needed or already addressed]"
-           ```
-   - If the user asks why comments are "still there," check `skipped_threads` before assuming the skill missed them. Outdated threads remain visible in GitHub/GitLab review history even when they no longer need action.
-   - After a separate implementation pass, do a second verification pass on any still-active unresolved threads. If the fix is now present in code, reply with the verification and resolve the thread instead of re-adding it to `fixes.md`. Resolve a multi-finding thread only once every finding in it is fixed or answered.
-     - **If a code change is needed:**
-       - Append a detailed entry to `fixes.md`:
-         - **Comment URL:** {url}
-         - **File & Context:** `{path}:{line}`
-         - **Finding:** {title} - {body}
-         - **Original Suggestion:** (Include the bot's suggestion or "Prompt for AI Agents" if present)
-         - **Verified Plan:** A step-by-step technical plan to implement the fix, including:
-           1. Specific lines to modify.
-           2. Logic changes required.
-           3. Any new imports or dependencies.
-           4. **Testing Strategy:** Which specific tests to run or add to verify the fix.
-         - **Risks:** Potential side effects or edge cases to watch out for.
+The user's own review bodies and top-level comments are excluded. Threads the user started stay, since a reviewer may have replied in them; act only on what others wrote there. `viewer_mentioned_author_later` is only a hint that the user later @-mentioned that author, not proof that this comment was answered.
 
-3. **Cleanup:**
-   - Once all comments are processed, delete the context file at the path the script printed.
-   - Inform the user that the `fixes.md` file is ready and provides a high-fidelity roadmap for implementation.
+## 2. Verify
 
-## Output requirements
+Make sure the working tree is at the PR/MR head (`head_ref`/`head_oid`). A bot comment can hold several findings; treat each one separately. For every finding, read the code and decide: still present and worth fixing, already fixed, or not applicable. Use the bot's "Prompt for AI Agents" block, GitHub `suggestion` block or GitLab ```` ```suggestion:-0+0 ```` block as input, not as the answer.
 
-- Produce a `fixes.md` file containing all actionable items.
-- Ensure all non-actionable threads are resolved on GitHub/GitLab.
-- Do not process outdated or already resolved comments.
-- Make it explicit to the user when a remaining comment is merely outdated versus still actively unresolved.
+## 3. Write the plan for review
+
+Write `fixes.md` at the repo root (untracked; never commit it) with two sections.
+
+**Fixes**: one entry per actionable finding:
+- Comment URL, `path:line`, the finding, the reviewer's suggestion if any
+- Verified plan: what to change and where, and which tests to run or add
+- Risks
+
+**Proposed replies**: one entry per comment that needs no code change but deserves an answer: the URL, the reply text, and whether the thread will be resolved. Resolving closes every finding in a thread, so propose resolving only when none of its findings is in Fixes; otherwise the reply covers the answered findings and the thread stays open. Address the author as `@login` only for a real login.
+
+**No reply needed**: list the rest with one line each on why: bot status, progress and promo posts, review wrappers and auto-approvals, and summaries that only repeat findings answered elsewhere. A reply there is only noise.
+
+Then stop and show the user the summary counts, the fixes and the proposed replies. **Post nothing and resolve nothing until the user approves**; they may edit, drop or move items between the sections.
+
+## 4. After approval
+
+Post each approved reply with the helper, never with `gh pr comment`, `gh api`, `glab` or an inline body (the shell mangles backticks and `$`). Write the reply text to a file first:
+
+```bash
+python3 {skill_dir}/scripts/reply.py <context file> <entry url> --body-file <reply.md> [--resolve]
+```
+
+- `thread`: replies inside the thread, then resolves it with `--resolve`. It does not resolve a thread that gained replies after the analysis, or one marked `resolvable: false`; run the analysis again and review the new replies. On GitHub it checks the reply is visible in the thread, and refuses if the user has a pending review on the PR, which would hold the reply hidden until submitted; tell the user to submit or discard that review.
+- `review` / `general`: neither GitHub nor GitLab can reply to these, so it posts a top-level comment that quotes and links the original. `--resolve` is refused.
+
+If the helper exits with an error, report it to the user; do not post another way.
+
+Implement the approved fixes if the user asks to. Afterwards, run the analysis again and check the still-active threads: for each fix now in the code, propose a reply plus resolve, again with approval first.
+
+## 5. Clean up
+
+Delete the context file at the path the script printed. Delete `fixes.md` once its items are done or the PR/MR is merged.
